@@ -181,13 +181,34 @@ function parseContatosTexto(texto) {
     const partes = linha.split(/[,;\t]/).map((p) => p.trim()).filter(Boolean);
     let nome = "", telefone = "", endereco = "";
     if (partes.length >= 2) {
-      // detecta qual parte é o telefone (mais dígitos)
+      // 1) acha o telefone em qualquer posição (é a parte com mais dígitos)
       const digitos = partes.map((p) => p.replace(/\D/g, "").length);
       const idxTel = digitos.indexOf(Math.max(...digitos));
       telefone = partes[idxTel];
       const outros = partes.filter((_, i) => i !== idxTel);
-      nome = outros[0] || "";
-      endereco = outros.slice(1).join(", ");
+
+      if (outros.length === 1) {
+        nome = outros[0];
+      } else if (outros.length > 1) {
+        // 2) do que sobrou, o nome também pode vir antes ou depois do endereço —
+        // compara qual ponta (primeira ou última) parece mais "nome" (poucos dígitos,
+        // é só uma parte) contra o resto (mais dígitos, geralmente vários pedaços = endereço)
+        const dígitosDe = (s) => s.replace(/\D/g, "").length;
+        const primeiro = dígitosDe(outros[0]);
+        const restoDoComeco = dígitosDe(outros.slice(1).join(""));
+        const ultimo = dígitosDe(outros[outros.length - 1]);
+        const restoDoFim = dígitosDe(outros.slice(0, -1).join(""));
+
+        if (primeiro >= 2 && primeiro > ultimo && restoDoComeco >= restoDoFim) {
+          // endereço vem primeiro, nome vem por último
+          nome = outros[outros.length - 1];
+          endereco = outros.slice(0, -1).join(", ");
+        } else {
+          // padrão mais comum: nome primeiro, endereço depois
+          nome = outros[0];
+          endereco = outros.slice(1).join(", ");
+        }
+      }
     } else if (partes.length === 1) {
       telefone = partes[0];
     }
