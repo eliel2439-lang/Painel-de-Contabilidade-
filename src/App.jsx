@@ -34,20 +34,27 @@ if (typeof window !== "undefined" && !window.storage) {
       const j = await r.json();
       return j.value == null ? null : { value: j.value };
     },
-    set: async (key, value) => {
+    set: async (key, value, opts) => {
       let r;
       try {
         r = await fetch("/api/data", {
           method: "POST",
           headers: { "Content-Type": "application/json" },
-          body: JSON.stringify({ value }),
+          body: JSON.stringify({ value, ifRev: opts && typeof opts === "object" ? opts.ifRev : undefined }),
         });
       } catch (e) {
-        throw new Error("não consegui nem chamar /api/data (rede ou domínio errado)");
+        const erroRede = new Error("não consegui nem chamar /api/data (rede ou domínio errado)");
+        erroRede.temporario = true;
+        throw erroRede;
       }
       if (!r.ok) {
         const texto = await r.text().catch(() => "");
-        throw new Error(`/api/data respondeu ${r.status}: ${texto || "sem detalhes — provavelmente o banco de dados (KV/Redis) não está conectado nesse projeto do Vercel"}`);
+        let mensagem = texto;
+        try { mensagem = JSON.parse(texto)?.error || texto; } catch (e) {}
+        const erro = new Error(mensagem || `/api/data respondeu ${r.status} — provavelmente o banco de dados (KV/Redis) não está conectado nesse projeto do Vercel`);
+        erro.conflito = r.status === 409;
+        erro.temporario = r.status >= 500 || r.status === 0;
+        throw erro;
       }
       return { value };
     },
@@ -108,6 +115,7 @@ function normalizarSegmentos(parsed) {
     meta: parsed.meta || 0,
     mensagens: parsed.mensagens || {},
     senhasEstado: parsed.senhasEstado || {},
+    _rev: parsed._rev ?? null,
   };
 }
 
@@ -141,6 +149,17 @@ function fmtBRL(v) {
 
 function chaveAtrib(seg, uf) {
   return seg + "|" + uf;
+}
+
+// "AAAA-MM-DD" no fuso horário local (não UTC) — importante pra agrupar "mensagens
+// por dia" no dia certo pra quem está no Brasil, principalmente envios feitos à
+// noite (o toISOString() sozinho usa UTC e jogava esses envios pro dia seguinte).
+function dataLocalISO(date) {
+  const d = date instanceof Date ? date : new Date(date);
+  const ano = d.getFullYear();
+  const mes = String(d.getMonth() + 1).padStart(2, "0");
+  const dia = String(d.getDate()).padStart(2, "0");
+  return `${ano}-${mes}-${dia}`;
 }
 
 function StatusIcon({ status, size = 12 }) {
@@ -244,6 +263,7 @@ export default function PainelProspeccao() {
   const [loadError, setLoadError] = useState(null);
   const [saveState, setSaveState] = useState("idle");
   const [saveError, setSaveError] = useState(null);
+  const [pendenteRetry, setPendenteRetry] = useState(null); // { next, tentativas } — última tentativa de salvar que falhou por motivo temporário
   const [segmentoAtual, setSegmentoAtual] = useState("Contabilidade");
   const [ufSelecionado, setUfSelecionado] = useState(null);
   const [novoSegmento, setNovoSegmento] = useState("");
@@ -298,8 +318,74 @@ export default function PainelProspeccao() {
     }
   };
 
+  // Se um salvamento falhou por um motivo temporário (rede, servidor fora do ar por
+  // um instante), tenta de novo sozinho algumas vezes, indo de mansinho (3s, 6s, 12s...)
+  // pra não martelar o servidor se o problema for mais duradouro.
+  useEffect(() => {
+    if (!pendenteRetry) return;
+    if (pendenteRetry.tentativas >= 6) return; // desiste de tentar sozinho; o aviso na tela continua visível
+    const espera = Math.min(3000 * Math.pow(2, pendenteRetry.tentativas), 60000);
+    const t = setTimeout(() => {
+      setPendenteRetry((p) => (p ? { ...p, tentativas: p.tentativas + 1 } : p));
+      persist(pendenteRetry.next);
+    }, espera);
+    return () => clearTimeout(t);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [pendenteRetry]);
+
+  // Avisa antes de fechar a aba/navegar pra fora se tiver algo ainda não confirmado
+  // como salvo no banco — pra nunca fechar achando que salvou sem ter salvo de verdade.
+  useEffect(() => {
+    const aindaNaoSalvou = saveState === "saving" || saveState === "error";
+    if (!aindaNaoSalvou) return;
+    const handler = (e) => {
+      e.preventDefault();
+      e.returnValue = "";
+    };
+    window.addEventListener("beforeunload", handler);
+    return () => window.removeEventListener("beforeunload", handler);
+  }, [saveState]);
+
   const definirSenhaEstado = (seg, uf, senha) => {
     persist({ ...data, senhasEstado: { ...data.senhasEstado, [chaveAtrib(seg, uf)]: senha } });
+  };
+
+  const listarBackups = async () => {
+    let r;
+    try {
+      r = await fetch("/api/data?listarBackups=1");
+    } catch (e) {
+      throw new Error("não consegui nem chamar o servidor pra listar os backups (rede?)");
+    }
+    if (!r.ok) {
+      const texto = await r.text().catch(() => "");
+      let mensagem = texto;
+      try { mensagem = JSON.parse(texto)?.error || texto; } catch (e) {}
+      throw new Error(mensagem || "não consegui listar os backups");
+    }
+    const j = await r.json();
+    return j.backups || [];
+  };
+
+  const restaurarBackup = async (ts) => {
+    let r;
+    try {
+      r = await fetch("/api/data", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ restaurarBackup: ts }),
+      });
+    } catch (e) {
+      throw new Error("não consegui nem chamar o servidor pra restaurar (rede?)");
+    }
+    if (!r.ok) {
+      const texto = await r.text().catch(() => "");
+      let mensagem = texto;
+      try { mensagem = JSON.parse(texto)?.error || texto; } catch (e) {}
+      throw new Error(mensagem || "não consegui restaurar esse backup");
+    }
+    // recarrega a página inteira pra garantir que tudo (inclusive a revisão) vem certinho do servidor
+    window.location.reload();
   };
 
   useEffect(() => {
@@ -333,16 +419,37 @@ export default function PainelProspeccao() {
   }, []);
 
   const persist = useCallback(async (next) => {
+    // Importante: a revisão só é "confirmada" (guardada em data._rev) DEPOIS que o
+    // banco confirma o salvamento. Enquanto isso, a tela já mostra a alteração (pra
+    // ficar rápido pro usuário), mas o `_rev` local continua sendo o último que o
+    // banco realmente confirmou — assim, se esse salvamento falhar, uma nova
+    // tentativa (manual ou automática) ainda vai comparar com o valor certo, em vez
+    // de "inventar" uma revisão que nunca existiu de verdade no servidor.
+    const revConfirmadaAnterior = next._rev ?? null;
     setData(next);
     setSaveState("saving");
+    const novoRev = Date.now();
     try {
-      await window.storage.set(STORAGE_KEY, JSON.stringify(next), false);
+      await window.storage.set(STORAGE_KEY, JSON.stringify({ ...next, _rev: novoRev }), { ifRev: revConfirmadaAnterior });
+      // só marca a revisão como confirmada se, nesse meio tempo, o usuário não tiver
+      // feito outra edição em cima (senão essa confirmação "antiga" pisaria na mais nova)
+      setData((atual) => (atual === next ? { ...next, _rev: novoRev } : atual));
       setSaveState("saved");
       setSaveError(null);
+      setPendenteRetry(null);
       setTimeout(() => setSaveState("idle"), 1000);
     } catch (e) {
       setSaveState("error");
       setSaveError(String(e?.message || e));
+      // Erro de conflito (outra pessoa salvou primeiro) não adianta tentar de novo
+      // sozinho — precisa recarregar a página pra pegar os dados certos. Qualquer
+      // outro tipo de erro (rede, servidor fora do ar por um instante) é tratado
+      // como temporário e tentamos de novo sozinhos daqui a pouco.
+      if (!e?.conflito) {
+        setPendenteRetry({ next, tentativas: 0 });
+      } else {
+        setPendenteRetry(null);
+      }
     }
   }, []);
 
@@ -451,7 +558,7 @@ export default function PainelProspeccao() {
           for (const cidade of arr) {
             for (const c of cidade.contatos || []) {
               if (c.enviado && c.enviadoTs) {
-                const dia = new Date(c.enviadoTs).toISOString().slice(0, 10);
+                const dia = dataLocalISO(new Date(c.enviadoTs));
                 porVendedor[vendedor].porDia[dia] = (porVendedor[vendedor].porDia[dia] || 0) + 1;
                 envioPorDia[dia] = (envioPorDia[dia] || 0) + 1;
               }
@@ -512,6 +619,7 @@ export default function PainelProspeccao() {
     if (!nome) return;
     if (data.segmentos[nome]) { setSegmentoAtual(nome); setNovoSegmento(""); setMostraNovoSegmento(false); return; }
     const next = {
+      ...data,
       segmentos: { ...data.segmentos, [nome]: {} },
       ordemSegmentos: [...data.ordemSegmentos, nome],
     };
@@ -525,7 +633,7 @@ export default function PainelProspeccao() {
     const seg = { ...data.segmentos };
     delete seg[nome];
     const ordem = data.ordemSegmentos.filter((s) => s !== nome);
-    const next = { segmentos: seg, ordemSegmentos: ordem };
+    const next = { ...data, segmentos: seg, ordemSegmentos: ordem };
     persist(next);
     if (segmentoAtual === nome) setSegmentoAtual(ordem[0] || "");
   };
@@ -766,9 +874,15 @@ export default function PainelProspeccao() {
         <div className="px-5 sm:px-8 pt-4">
           <div style={{ background: "#2a1c1c", border: "1px solid #a34a42" }} className="rounded-xl px-4 py-3 text-sm text-[#f0a89f] max-w-7xl mx-auto">
             <div className="font-semibold mb-0.5">
-              {loadError ? "Não consegui carregar os dados salvos." : "A última alteração não foi salva."}
+              {loadError ? "Não consegui carregar os dados salvos." : "A última alteração ainda não foi confirmada como salva."}
             </div>
             <div className="mono text-[11px] text-[#d69890]">{loadError || saveError}</div>
+            {pendenteRetry && pendenteRetry.tentativas < 6 && (
+              <div className="text-[11px] text-[#e0a458] mt-1">Tentando salvar de novo sozinho (tentativa {pendenteRetry.tentativas + 1} de 6)… não fecha essa aba até resolver.</div>
+            )}
+            {pendenteRetry && pendenteRetry.tentativas >= 6 && (
+              <div className="text-[11px] text-[#e0a458] mt-1">Já tentei salvar automaticamente várias vezes e não consegui. Verifica sua internet e tenta mexer em algo de novo pra forçar um novo salvamento.</div>
+            )}
             <div className="text-[11px] text-[#d69890] mt-1">Manda esse texto de erro pro Claude — com ele dá pra descobrir se é o banco de dados que não ficou conectado direito no Vercel.</div>
           </div>
         </div>
@@ -809,6 +923,9 @@ export default function PainelProspeccao() {
               onSetMeta={setMeta}
               onDefinirSenhaEstado={definirSenhaEstado}
               senhaDoEstado={senhaDoEstado}
+              onListarBackups={listarBackups}
+              onRestaurarBackup={restaurarBackup}
+              onAtribuirVendedor={atribuirVendedor}
             />
           )
         ) : tela === "vendedores" ? (
@@ -935,9 +1052,7 @@ export default function PainelProspeccao() {
                 setSortBy={setSortBy}
                 onVoltar={() => { setUfSelecionado(null); setFiltro(""); }}
                 resumo={resumoPorEstado[ufSelecionado]}
-                vendedores={data.vendedores}
                 vendedorAtual={data.atribuicoes[chaveAtrib(segmentoAtual, ufSelecionado)] || ""}
-                onAtribuirVendedor={(v) => atribuirVendedor(segmentoAtual, ufSelecionado, v)}
                 mensagem={data.mensagens?.[segmentoAtual] || MENSAGEM_PADRAO_CONTABILIDADE}
                 onChangeMensagem={(txt) => updateMensagem(segmentoAtual, txt)}
               />
@@ -1131,7 +1246,7 @@ function SegmentosOverview({ data, resumoPorSegmento, onEscolher, novoSegmento, 
   );
 }
 
-function EstadoView({ uf, segmentoAtual, data, updateCidade, filtro, setFiltro, sortBy, setSortBy, onVoltar, resumo, vendedores, vendedorAtual, onAtribuirVendedor, mensagem, onChangeMensagem }) {
+function EstadoView({ uf, segmentoAtual, data, updateCidade, filtro, setFiltro, sortBy, setSortBy, onVoltar, resumo, vendedorAtual, mensagem, onChangeMensagem }) {
   const s = STATES_GEO.states[uf];
   const [x, y, w, h] = s.bbox;
   const pad = Math.max(w, h) * 0.1;
@@ -1250,23 +1365,13 @@ function EstadoView({ uf, segmentoAtual, data, updateCidade, filtro, setFiltro, 
         >
           mensagem-padrão do segmento {mostraMensagem ? "▲" : "▼"}
         </button>
-        <span className="flex items-center gap-1.5 ml-auto">
+        <span className="flex items-center gap-1.5 ml-auto text-xs">
           <Users size={13} className="text-slate-500" />
-          <select
-            value={vendedorAtual}
-            onChange={(e) => onAtribuirVendedor(e.target.value || null)}
-            style={{
-              background: vendedorAtual ? "#2a2418" : "#14181f",
-              border: "1px solid " + (vendedorAtual ? "#e0a458" : "#2c3444"),
-              color: vendedorAtual ? "#e0a458" : "#8b95a6",
-            }}
-            className="text-xs rounded-lg px-2 py-1.5"
-          >
-            <option value="">sem vendedor atribuído</option>
-            {vendedores.map((v) => (
-              <option key={v} value={v}>{v}</option>
-            ))}
-          </select>
+          {vendedorAtual ? (
+            <span style={{ color: "#e0a458" }} className="font-medium">{vendedorAtual}</span>
+          ) : (
+            <span className="text-slate-500">sem vendedor atribuído</span>
+          )}
         </span>
       </div>
 
@@ -2071,26 +2176,41 @@ function ChartTooltip({ active, payload, label }) {
   );
 }
 
-function PainelGeralView({ data, resumoPorSegmento, resumoGlobal, onIrParaSegmento, onExportar, onVoltar, onSetMeta, onDefinirSenhaEstado, senhaDoEstado }) {
-  const hojeISO = new Date().toISOString().slice(0, 10);
+function PainelGeralView({ data, resumoPorSegmento, resumoGlobal, onIrParaSegmento, onExportar, onVoltar, onSetMeta, onDefinirSenhaEstado, senhaDoEstado, onListarBackups, onRestaurarBackup, onAtribuirVendedor }) {
+  const hojeISO = dataLocalISO(new Date());
   const mesAtual = hojeISO.slice(0, 7); // "AAAA-MM"
 
   const dadosVendedores = useMemo(() => {
     return data.vendedores
       .map((v) => {
-        const info = resumoGlobal.porVendedor[v] || { contatos: 0, enviados: 0, porDia: {} };
+        const info = resumoGlobal.porVendedor[v] || { contatos: 0, enviados: 0, fechados: 0, porDia: {} };
         const hoje = info.porDia[hojeISO] || 0;
         const esteMes = Object.entries(info.porDia).reduce((s, [dia, qtd]) => (dia.startsWith(mesAtual) ? s + qtd : s), 0);
+        const diasAtivos = Object.keys(info.porDia).length;
+        const diasComEnvio = Object.keys(info.porDia).sort((a, b) => b.localeCompare(a));
+        const ultimoDia = diasComEnvio[0] || null;
+        const diasSemEnviar = ultimoDia ? Math.floor((Date.now() - new Date(ultimoDia + "T00:00:00").getTime()) / 86400000) : null;
         return {
           nome: v,
           hoje,
           esteMes,
           total: info.enviados || 0,
+          fechados: info.fechados || 0,
           restam: Math.max(0, (info.contatos || 0) - (info.enviados || 0)),
+          taxaConversao: info.enviados > 0 ? (info.fechados / info.enviados) * 100 : null,
+          mediaDiaria: diasAtivos > 0 ? (info.enviados || 0) / diasAtivos : 0,
+          diasAtivos,
+          ultimoDia,
+          diasSemEnviar,
         };
       })
       .sort((a, b) => b.hoje - a.hoje || b.esteMes - a.esteMes);
   }, [data.vendedores, resumoGlobal, hojeISO, mesAtual]);
+
+  const rankingMensal = useMemo(
+    () => [...dadosVendedores].filter((v) => v.esteMes > 0).sort((a, b) => b.esteMes - a.esteMes),
+    [dadosVendedores]
+  );
 
   const totalHoje = dadosVendedores.reduce((s, v) => s + v.hoje, 0);
   const totalMes = dadosVendedores.reduce((s, v) => s + v.esteMes, 0);
@@ -2104,6 +2224,84 @@ function PainelGeralView({ data, resumoPorSegmento, resumoGlobal, onIrParaSegmen
       qtd,
     }));
   }, [resumoGlobal.envioPorDia]);
+
+  const rankingDiario = useMemo(() => {
+    const diasComEnvio = Object.keys(resumoGlobal.envioPorDia || {}).sort((a, b) => b.localeCompare(a));
+    return diasComEnvio.slice(0, 7).map((dia) => {
+      const ranking = data.vendedores
+        .map((v) => ({ nome: v, qtd: resumoGlobal.porVendedor[v]?.porDia?.[dia] || 0 }))
+        .filter((x) => x.qtd > 0)
+        .sort((a, b) => b.qtd - a.qtd);
+      return {
+        dia,
+        diaLabel: new Date(dia + "T12:00:00").toLocaleDateString("pt-BR", { weekday: "short", day: "2-digit", month: "2-digit" }),
+        ranking,
+        total: ranking.reduce((s, x) => s + x.qtd, 0),
+      };
+    });
+  }, [resumoGlobal, data.vendedores]);
+
+  // --- Funil: contatos → enviados → fechados → valor ---
+  const funil = useMemo(() => {
+    const contatos = resumoGlobal.totalContatos || 0;
+    const enviados = resumoGlobal.totalEnviados || 0;
+    const fechados = resumoGlobal.totalFechados || 0;
+    const valor = resumoGlobal.totalValor || 0;
+    return [
+      { nome: "Contatos importados", valor: contatos, pctDoAnterior: null },
+      { nome: "Mensagens enviadas", valor: enviados, pctDoAnterior: contatos > 0 ? (enviados / contatos) * 100 : 0 },
+      { nome: "Clientes fechados", valor: fechados, pctDoAnterior: enviados > 0 ? (fechados / enviados) * 100 : 0 },
+    ];
+  }, [resumoGlobal]);
+  const coberturaPct = resumoGlobal.totalContatos > 0 ? (resumoGlobal.totalEnviados / resumoGlobal.totalContatos) * 100 : 0;
+
+  // --- Essa semana vs semana passada ---
+  // Compara as chaves de data (string "AAAA-MM-DD") diretamente, em vez de subtrair
+  // horários — subtrair Date() com horas diferentes de "agora" e de meio-dia do dia
+  // registrado podia, em alguns horários do dia, jogar um dia pro grupo errado.
+  const comparativoSemanal = useMemo(() => {
+    const diaISO = (n) => {
+      const d = new Date();
+      d.setDate(d.getDate() - n);
+      return dataLocalISO(d);
+    };
+    let semanaAtual = 0, semanaPassada = 0;
+    for (let i = 0; i < 7; i++) semanaAtual += resumoGlobal.envioPorDia?.[diaISO(i)] || 0;
+    for (let i = 7; i < 14; i++) semanaPassada += resumoGlobal.envioPorDia?.[diaISO(i)] || 0;
+    const variacaoPct = semanaPassada > 0 ? ((semanaAtual - semanaPassada) / semanaPassada) * 100 : null;
+    return { semanaAtual, semanaPassada, variacaoPct };
+  }, [resumoGlobal.envioPorDia]);
+
+  // --- Alertas operacionais: cidades sem nenhum envio, estados sem vendedor, estados com senha padrão ---
+  const alertas = useMemo(() => {
+    const cidadesEsquecidas = [];
+    const estadosSemVendedor = [];
+    const estadosSenhaPadrao = [];
+    for (const seg of data.ordemSegmentos) {
+      const estados = data.segmentos[seg] || {};
+      for (const uf of Object.keys(estados)) {
+        const cidades = estados[uf];
+        const temAlgumContato = Object.values(cidades).some((c) => (c.contatos || []).length > 0);
+        if (!temAlgumContato) continue; // estado sem nenhum contato ainda não é "esquecido", é só vazio
+
+        if (!data.atribuicoes[chaveAtrib(seg, uf)]) {
+          estadosSemVendedor.push({ seg, uf, nome: STATES_GEO.states[uf]?.name || uf });
+        }
+        if (!data.senhasEstado?.[chaveAtrib(seg, uf)]) {
+          estadosSenhaPadrao.push({ seg, uf, nome: STATES_GEO.states[uf]?.name || uf });
+        }
+        for (const [cidadeNome, info] of Object.entries(cidades)) {
+          const contatos = info.contatos || [];
+          if (contatos.length > 0 && contatos.every((c) => !c.enviado)) {
+            cidadesEsquecidas.push({ seg, uf, cidade: cidadeNome, qtd: contatos.length });
+          }
+        }
+      }
+    }
+    const vendedoresParados = dadosVendedores.filter((v) => v.diasSemEnviar !== null && v.diasSemEnviar >= 3);
+    const vendedoresNuncaEnviaram = dadosVendedores.filter((v) => v.diasSemEnviar === null);
+    return { cidadesEsquecidas, estadosSemVendedor, estadosSenhaPadrao, vendedoresParados, vendedoresNuncaEnviaram };
+  }, [data, dadosVendedores]);
 
   // --- Configurar senha por estado (admin) ---
   const [segAdmin, setSegAdmin] = useState(data.ordemSegmentos[0] || "");
@@ -2124,6 +2322,38 @@ function PainelGeralView({ data, resumoPorSegmento, resumoGlobal, onIrParaSegmen
     onDefinirSenhaEstado(segAdmin, ufAdmin, senhaAdminInput.trim());
     setSalvouSenha(true);
     setTimeout(() => setSalvouSenha(false), 1500);
+  };
+
+  // --- Backups / recuperação de dados ---
+  const [backups, setBackups] = useState(null); // null = ainda não carregou
+  const [carregandoBackups, setCarregandoBackups] = useState(false);
+  const [erroBackups, setErroBackups] = useState("");
+  const [restaurando, setRestaurando] = useState(null); // timestamp em restauração
+  const [confirmarRestauro, setConfirmarRestauro] = useState(null);
+
+  const carregarBackups = async () => {
+    setCarregandoBackups(true);
+    setErroBackups("");
+    try {
+      const lista = await onListarBackups();
+      setBackups(lista);
+    } catch (e) {
+      setErroBackups(String(e?.message || e));
+    } finally {
+      setCarregandoBackups(false);
+    }
+  };
+
+  const confirmarERestaurar = async (ts) => {
+    setRestaurando(ts);
+    setErroBackups("");
+    try {
+      await onRestaurarBackup(ts);
+      // onRestaurarBackup já recarrega a página em caso de sucesso
+    } catch (e) {
+      setErroBackups(String(e?.message || e));
+      setRestaurando(null);
+    }
   };
 
   return (
@@ -2158,6 +2388,62 @@ function PainelGeralView({ data, resumoPorSegmento, resumoGlobal, onIrParaSegmen
         ))}
       </div>
 
+      <div className="grid grid-cols-1 lg:grid-cols-[1.3fr_1fr] gap-4 mb-4">
+        <div style={{ background: "#1c222c", border: "1px solid #232a36" }} className="rounded-2xl p-4">
+          <div className="text-xs uppercase tracking-wider text-slate-500 mb-3 flex items-center gap-1.5">
+            <LayoutDashboard size={13} /> Funil: do contato ao cliente fechado
+          </div>
+          <div className="flex flex-col gap-2">
+            {funil.map((f, i) => (
+              <div key={f.nome}>
+                <div className="flex items-center justify-between text-xs mb-1">
+                  <span className="text-slate-300">{f.nome}</span>
+                  <span className="mono text-slate-200 font-semibold">
+                    {f.valor.toLocaleString("pt-BR")}
+                    {f.pctDoAnterior != null && <span className="text-slate-500 font-normal"> · {f.pctDoAnterior.toFixed(1)}%</span>}
+                  </span>
+                </div>
+                <div className="h-2 rounded-full" style={{ background: "#14181f" }}>
+                  <div
+                    className="h-2 rounded-full"
+                    style={{
+                      width: `${funil[0].valor > 0 ? Math.min(100, Math.max(2, (f.valor / funil[0].valor) * 100)) : 0}%`,
+                      background: i === 0 ? "#5b6579" : i === 1 ? "#e0a458" : "#4f9d69",
+                    }}
+                  />
+                </div>
+              </div>
+            ))}
+          </div>
+          <div className="text-[11px] text-slate-500 mt-3">
+            {coberturaPct.toFixed(1)}% dos contatos importados já receberam mensagem
+          </div>
+        </div>
+
+        <div style={{ background: "#1c222c", border: "1px solid #232a36" }} className="rounded-2xl p-4">
+          <div className="text-xs uppercase tracking-wider text-slate-500 mb-3 flex items-center gap-1.5">
+            <TrendingUp size={13} /> Essa semana vs. semana passada
+          </div>
+          <div className="flex items-end gap-4">
+            <div>
+              <div className="mono text-2xl font-bold text-slate-50">{comparativoSemanal.semanaAtual}</div>
+              <div className="text-[11px] text-slate-500">últimos 7 dias</div>
+            </div>
+            <div className="pb-1">
+              <div className="mono text-sm text-slate-500">{comparativoSemanal.semanaPassada}</div>
+              <div className="text-[10px] text-slate-600">7 dias antes disso</div>
+            </div>
+          </div>
+          {comparativoSemanal.variacaoPct != null ? (
+            <div className="mt-2 text-xs font-medium" style={{ color: comparativoSemanal.variacaoPct >= 0 ? "#4f9d69" : "#e0736a" }}>
+              {comparativoSemanal.variacaoPct >= 0 ? "▲" : "▼"} {Math.abs(comparativoSemanal.variacaoPct).toFixed(0)}% em relação à semana anterior
+            </div>
+          ) : (
+            <div className="mt-2 text-[11px] text-slate-600 italic">sem dados da semana anterior ainda pra comparar</div>
+          )}
+        </div>
+      </div>
+
       <div style={{ background: "#1c222c", border: "1px solid #232a36" }} className="rounded-2xl p-4 mb-4">
         <div className="text-xs uppercase tracking-wider text-slate-500 mb-3 flex items-center gap-1.5">
           <TrendingUp size={13} /> Mensagens enviadas por dia (últimos 14 dias)
@@ -2179,8 +2465,112 @@ function PainelGeralView({ data, resumoPorSegmento, resumoGlobal, onIrParaSegmen
 
       <div style={{ background: "#1c222c", border: "1px solid #232a36" }} className="rounded-2xl p-4 mb-4">
         <div className="text-xs uppercase tracking-wider text-slate-500 mb-3 flex items-center gap-1.5">
+          <Medal size={13} /> Quem mais enviou em cada dia (últimos 7 dias com envio)
+        </div>
+        {rankingDiario.length === 0 ? (
+          <div className="text-sm text-slate-500 italic py-6 text-center">ainda não tem nenhuma mensagem enviada registrada</div>
+        ) : (
+          <div className="flex flex-col gap-2">
+            {rankingDiario.map((d) => (
+              <div key={d.dia} className="flex flex-col sm:flex-row sm:items-center gap-2 sm:gap-4 px-3 py-2.5 rounded-lg" style={{ background: "#14181f", border: "1px solid #2c3444" }}>
+                <div className="text-xs text-slate-400 capitalize sm:w-28 shrink-0">{d.diaLabel} <span className="text-slate-600">· {d.total} no total</span></div>
+                <div className="flex items-center gap-3 flex-wrap">
+                  {d.ranking.slice(0, 3).map((v, i) => (
+                    <span key={v.nome} className="flex items-center gap-1 text-xs">
+                      <span>{["🥇", "🥈", "🥉"][i]}</span>
+                      <span className="text-slate-200 font-medium">{v.nome}</span>
+                      <span className="mono text-slate-500">({v.qtd})</span>
+                    </span>
+                  ))}
+                  {d.ranking.length > 3 && (
+                    <span className="text-[11px] text-slate-600">+{d.ranking.length - 3} vendedor{d.ranking.length - 3 === 1 ? "" : "es"}</span>
+                  )}
+                </div>
+              </div>
+            ))}
+          </div>
+        )}
+      </div>
+
+      {(alertas.cidadesEsquecidas.length > 0 || alertas.estadosSemVendedor.length > 0 || alertas.estadosSenhaPadrao.length > 0 || alertas.vendedoresParados.length > 0 || alertas.vendedoresNuncaEnviaram.length > 0) && (
+        <div style={{ background: "#1c222c", border: "1px solid #2c3444" }} className="rounded-2xl p-4 mb-4">
+          <div className="text-xs uppercase tracking-wider text-slate-500 mb-3 flex items-center gap-1.5">
+            ⚠ Pontos de atenção
+          </div>
+          <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
+            {alertas.cidadesEsquecidas.length > 0 && (
+              <div style={{ background: "#14181f", border: "1px solid #2c3444" }} className="rounded-xl p-3">
+                <div className="text-xs font-semibold text-slate-200 mb-1.5">Cidades com contato, sem nenhum envio</div>
+                <div className="flex flex-col gap-1 max-h-32 overflow-y-auto">
+                  {alertas.cidadesEsquecidas.slice(0, 8).map((c) => (
+                    <div key={c.seg + c.uf + c.cidade} className="text-[11px] text-slate-400">
+                      {c.cidade} <span className="text-slate-600">({c.uf})</span> — <span className="text-[#e0a458]">{c.qtd} contato{c.qtd === 1 ? "" : "s"} parado{c.qtd === 1 ? "" : "s"}</span>
+                    </div>
+                  ))}
+                  {alertas.cidadesEsquecidas.length > 8 && <div className="text-[11px] text-slate-600">+{alertas.cidadesEsquecidas.length - 8} outra{alertas.cidadesEsquecidas.length - 8 === 1 ? "" : "s"}</div>}
+                </div>
+              </div>
+            )}
+            {alertas.estadosSemVendedor.length > 0 && (
+              <div style={{ background: "#14181f", border: "1px solid #2c3444" }} className="rounded-xl p-3">
+                <div className="text-xs font-semibold text-slate-200 mb-1.5">Estados com contato, sem vendedor atribuído</div>
+                <div className="flex flex-col gap-1 max-h-32 overflow-y-auto">
+                  {alertas.estadosSemVendedor.map((e) => (
+                    <div key={e.seg + e.uf} className="text-[11px] text-slate-400">{e.nome} <span className="text-slate-600">({e.seg})</span></div>
+                  ))}
+                </div>
+              </div>
+            )}
+            {alertas.estadosSenhaPadrao.length > 0 && (
+              <div style={{ background: "#14181f", border: "1px solid #2c3444" }} className="rounded-xl p-3">
+                <div className="text-xs font-semibold text-slate-200 mb-1.5">Estados ainda com a senha padrão (1234)</div>
+                <div className="flex flex-col gap-1 max-h-32 overflow-y-auto">
+                  {alertas.estadosSenhaPadrao.map((e) => (
+                    <div key={e.seg + e.uf} className="text-[11px] text-slate-400">{e.nome} <span className="text-slate-600">({e.seg})</span></div>
+                  ))}
+                </div>
+              </div>
+            )}
+            {alertas.vendedoresParados.length > 0 && (
+              <div style={{ background: "#14181f", border: "1px solid #2c3444" }} className="rounded-xl p-3">
+                <div className="text-xs font-semibold text-slate-200 mb-1.5">Vendedor sem enviar há 3+ dias</div>
+                <div className="flex flex-col gap-1 max-h-32 overflow-y-auto">
+                  {alertas.vendedoresParados.map((v) => (
+                    <div key={v.nome} className="text-[11px] text-slate-400">{v.nome} — <span className="text-[#e0736a]">{v.diasSemEnviar} dia{v.diasSemEnviar === 1 ? "" : "s"} sem enviar</span></div>
+                  ))}
+                </div>
+              </div>
+            )}
+            {alertas.vendedoresNuncaEnviaram.length > 0 && (
+              <div style={{ background: "#14181f", border: "1px solid #2c3444" }} className="rounded-xl p-3">
+                <div className="text-xs font-semibold text-slate-200 mb-1.5">Vendedor cadastrado, nunca enviou nada</div>
+                <div className="flex flex-col gap-1 max-h-32 overflow-y-auto">
+                  {alertas.vendedoresNuncaEnviaram.map((v) => (
+                    <div key={v.nome} className="text-[11px] text-slate-400">{v.nome}</div>
+                  ))}
+                </div>
+              </div>
+            )}
+          </div>
+        </div>
+      )}
+
+      <div style={{ background: "#1c222c", border: "1px solid #232a36" }} className="rounded-2xl p-4 mb-4">
+        <div className="text-xs uppercase tracking-wider text-slate-500 mb-3 flex items-center gap-1.5">
           <Users size={13} /> Mensagens por vendedor
         </div>
+        {rankingMensal.length > 0 && (
+          <div className="flex items-center gap-4 flex-wrap mb-4 pb-4" style={{ borderBottom: "1px solid #232a36" }}>
+            <span className="text-[11px] text-slate-500 uppercase tracking-wider">ranking do mês</span>
+            {rankingMensal.slice(0, 3).map((v, i) => (
+              <span key={v.nome} className="flex items-center gap-1 text-sm">
+                <span>{["🥇", "🥈", "🥉"][i]}</span>
+                <span className="text-slate-100 font-medium">{v.nome}</span>
+                <span className="mono text-[#4f9d69] text-xs">{v.esteMes}</span>
+              </span>
+            ))}
+          </div>
+        )}
         {dadosVendedores.length === 0 ? (
           <div className="text-sm text-slate-500 italic py-10 text-center">cadastre vendedores e atribua a um estado pra ver aqui</div>
         ) : (
@@ -2192,19 +2582,27 @@ function PainelGeralView({ data, resumoPorSegmento, resumoGlobal, onIrParaSegmen
                   <th className="pb-2 pr-3">Hoje</th>
                   <th className="pb-2 pr-3">Este mês</th>
                   <th className="pb-2 pr-3">Total geral</th>
+                  <th className="pb-2 pr-3">Média/dia ativo</th>
+                  <th className="pb-2 pr-3">Conversão</th>
+                  <th className="pb-2 pr-3">Última atividade</th>
                   <th className="pb-2">Contatos restantes</th>
                 </tr>
               </thead>
               <tbody>
                 {dadosVendedores.map((v, i) => (
                   <tr key={v.nome} style={{ borderTop: "1px solid #232a36" }}>
-                    <td className="py-2 pr-3 text-slate-100 flex items-center gap-1.5">
+                    <td className="py-2 pr-3 text-slate-100 flex items-center gap-1.5 whitespace-nowrap">
                       {i === 0 && v.hoje > 0 && <Medal size={13} className="text-[#e0a458]" />}
                       {v.nome}
                     </td>
                     <td className="py-2 pr-3 mono font-semibold" style={{ color: v.hoje > 0 ? "#4f9d69" : "#5b6579" }}>{v.hoje}</td>
                     <td className="py-2 pr-3 mono text-slate-300">{v.esteMes}</td>
                     <td className="py-2 pr-3 mono text-slate-400">{v.total}</td>
+                    <td className="py-2 pr-3 mono text-slate-400">{v.mediaDiaria > 0 ? v.mediaDiaria.toFixed(1) : "—"}</td>
+                    <td className="py-2 pr-3 mono" style={{ color: v.taxaConversao > 0 ? "#4f9d69" : "#5b6579" }}>{v.taxaConversao != null ? v.taxaConversao.toFixed(1) + "%" : "—"} <span className="text-slate-600">({v.fechados})</span></td>
+                    <td className="py-2 pr-3 text-[11px] whitespace-nowrap" style={{ color: v.diasSemEnviar === null ? "#5b6579" : v.diasSemEnviar >= 3 ? "#e0736a" : "#5b6579" }}>
+                      {v.diasSemEnviar === null ? "nunca enviou" : v.diasSemEnviar === 0 ? "hoje" : `há ${v.diasSemEnviar}d`}
+                    </td>
                     <td className="py-2 mono" style={{ color: v.restam > 0 ? "#e0a458" : "#5b6579" }}>{v.restam}</td>
                   </tr>
                 ))}
@@ -2257,11 +2655,83 @@ function PainelGeralView({ data, resumoPorSegmento, resumoGlobal, onIrParaSegmen
           </div>
         </div>
         {ufAdmin && (
-          <div className="text-[11px] text-slate-500 mt-1">
-            Vendedor responsável hoje por {STATES_GEO.states[ufAdmin]?.name}: {vendedorDoEstadoAdmin ? <span className="text-[#e0a458]">{vendedorDoEstadoAdmin}</span> : "ninguém atribuído ainda (atribua lá dentro do estado, no cabeçalho)"}
-            {" · "}senha atual: <span className="mono text-slate-300">{senhaAtualAdmin}</span>
+          <div className="flex items-center gap-2 mb-1">
+            <span className="text-[11px] text-slate-500">Vendedor(a) responsável por {STATES_GEO.states[ufAdmin]?.name}:</span>
+            <select
+              value={vendedorDoEstadoAdmin}
+              onChange={(e) => onAtribuirVendedor(segAdmin, ufAdmin, e.target.value || null)}
+              style={{
+                background: vendedorDoEstadoAdmin ? "#2a2418" : "#14181f",
+                border: "1px solid " + (vendedorDoEstadoAdmin ? "#e0a458" : "#2c3444"),
+                color: vendedorDoEstadoAdmin ? "#e0a458" : "#8b95a6",
+              }}
+              className="text-xs rounded-lg px-2 py-1.5"
+            >
+              <option value="">sem vendedor atribuído</option>
+              {data.vendedores.map((v) => (
+                <option key={v} value={v}>{v}</option>
+              ))}
+            </select>
           </div>
         )}
+        {ufAdmin && (
+          <div className="text-[11px] text-slate-500 mt-1">
+            senha atual: <span className="mono text-slate-300">{senhaAtualAdmin}</span>
+          </div>
+        )}
+      </div>
+
+      <div style={{ background: "#1c222c", border: "1px solid #232a36" }} className="rounded-2xl p-4 mt-4">
+        <div className="text-xs uppercase tracking-wider text-slate-500 mb-1 flex items-center gap-1.5">
+          <Clock size={13} /> Recuperar dados (backups automáticos)
+        </div>
+        <div className="text-[11px] text-slate-500 mb-3">
+          Toda vez que alguém salva algo, o sistema guarda uma cópia de como os dados estavam pouco antes — até {60} pontos de restauração.
+          Se algo sumir ou for sobrescrito por engano, dá pra voltar pra um desses momentos aqui.
+        </div>
+        {backups === null ? (
+          <button
+            onClick={carregarBackups}
+            disabled={carregandoBackups}
+            style={{ background: "#14181f", border: "1px solid #2c3444", color: "#c3cad6" }}
+            className="px-3 py-2 rounded-lg text-xs font-medium"
+          >
+            {carregandoBackups ? "carregando…" : "ver backups disponíveis"}
+          </button>
+        ) : backups.length === 0 ? (
+          <div className="text-xs text-slate-500 italic">nenhum backup ainda — eles começam a aparecer conforme o painel for usado</div>
+        ) : (
+          <div className="flex flex-col gap-1.5 max-h-64 overflow-y-auto">
+            {backups.map((ts) => (
+              <div key={ts} className="flex flex-col sm:flex-row sm:items-center justify-between gap-2 px-3 py-2 rounded-lg" style={{ background: "#14181f", border: "1px solid #2c3444" }}>
+                <span className="mono text-xs text-slate-300">{new Date(ts).toLocaleString("pt-BR")}</span>
+                {confirmarRestauro === ts ? (
+                  <span className="flex items-center gap-2 flex-wrap">
+                    <span className="text-[11px] text-[#e0736a]">restaurar este e perder o que veio depois?</span>
+                    <button
+                      onClick={() => confirmarERestaurar(ts)}
+                      disabled={restaurando === ts}
+                      style={{ background: "#a34a42", color: "#fff" }}
+                      className="text-[11px] font-semibold px-2.5 py-1 rounded-md shrink-0"
+                    >
+                      {restaurando === ts ? "restaurando…" : "sim, restaurar"}
+                    </button>
+                    <button onClick={() => setConfirmarRestauro(null)} className="text-[11px] text-slate-500 shrink-0">cancelar</button>
+                  </span>
+                ) : (
+                  <button
+                    onClick={() => setConfirmarRestauro(ts)}
+                    style={{ background: "#1c222c", border: "1px solid #2c3444", color: "#c3cad6" }}
+                    className="text-[11px] font-medium px-2.5 py-1 rounded-md self-start sm:self-auto"
+                  >
+                    restaurar este
+                  </button>
+                )}
+              </div>
+            ))}
+          </div>
+        )}
+        {erroBackups && <div className="text-[11px] text-[#e0736a] mt-2">{erroBackups}</div>}
       </div>
     </div>
   );
