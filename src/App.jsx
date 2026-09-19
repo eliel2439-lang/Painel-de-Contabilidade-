@@ -1071,12 +1071,12 @@ export default function PainelProspeccao() {
   const registrarEnvioContato = async (uf, cidade, contatoId) => {
     const seg = segmentoAtual;
     const token = tokenEstado(seg, uf);
-    const res = await executarAcao("send_contact", { seg, uf, city: cidade, contactId }, token);
+    const res = await executarAcao("send_contact", { seg, uf, city: cidade, contactId: contatoId }, token);
     const current = dataRef.current || emptyData();
     const segData = current.segmentos?.[seg] || {};
     const ufData = segData[uf] || {};
     const atual = { ...defaultCidade(), ...(ufData[cidade] || {}) };
-    const contatos = (Array.isArray(atual.contatos) ? atual.contatos : []).map((c) => String(c.id) === String(contactId) && res.contact ? res.contact : c);
+    const contatos = (Array.isArray(atual.contatos) ? atual.contatos : []).map((c) => String(c.id) === String(contatoId) && res.contact ? res.contact : c);
     const city = { ...atual, ...(res.citySummary || {}), contatos, _contatosCarregados: true };
     commitData({
       ...current,
@@ -1090,12 +1090,12 @@ export default function PainelProspeccao() {
     if (!painelGeralOk) throw new Error("somente o Acesso 1 pode alterar envios já registrados");
     const seg = segmentoAtual;
     const token = tokenEstado(seg, uf);
-    const res = await executarAcao("unmark_contact", { seg, uf, city: cidade, contactId }, token);
+    const res = await executarAcao("unmark_contact", { seg, uf, city: cidade, contactId: contatoId }, token);
     const current = dataRef.current || emptyData();
     const segData = current.segmentos?.[seg] || {};
     const ufData = segData[uf] || {};
     const atual = { ...defaultCidade(), ...(ufData[cidade] || {}) };
-    const contatos = (Array.isArray(atual.contatos) ? atual.contatos : []).map((c) => String(c.id) === String(contactId) && res.contact ? res.contact : c);
+    const contatos = (Array.isArray(atual.contatos) ? atual.contatos : []).map((c) => String(c.id) === String(contatoId) && res.contact ? res.contact : c);
     const city = { ...atual, ...(res.citySummary || {}), contatos, _contatosCarregados: true };
     commitData({
       ...current,
@@ -1109,12 +1109,12 @@ export default function PainelProspeccao() {
     if (!painelGeralOk) throw new Error("somente o Acesso 1 pode excluir contatos");
     const seg = segmentoAtual;
     const token = tokenEstado(seg, uf);
-    const res = await executarAcao("remove_contact", { seg, uf, city: cidade, contactId }, token);
+    const res = await executarAcao("remove_contact", { seg, uf, city: cidade, contactId: contatoId }, token);
     const current = dataRef.current || emptyData();
     const segData = current.segmentos?.[seg] || {};
     const ufData = segData[uf] || {};
     const atual = { ...defaultCidade(), ...(ufData[cidade] || {}) };
-    const contatos = (Array.isArray(atual.contatos) ? atual.contatos : []).filter((c) => String(c.id) !== String(contactId));
+    const contatos = (Array.isArray(atual.contatos) ? atual.contatos : []).filter((c) => String(c.id) !== String(contatoId));
     const city = { ...atual, ...(res.citySummary || {}), contatos, _contatosCarregados: true };
     commitData({ ...current, segmentos: { ...current.segmentos, [seg]: { ...segData, [uf]: { ...ufData, [cidade]: city } } } });
     return res;

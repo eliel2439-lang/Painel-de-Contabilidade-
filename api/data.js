@@ -52,7 +52,7 @@ const GZIP_PREFIX = "__gzip_base64_v1__:";
 // Segredos SOMENTE do servidor. Este arquivo não é empacotado pelo Vite e não vai
 // para o HTML/JavaScript entregue ao navegador. O usuário pediu explicitamente
 // para não depender de configuração no Vercel.
-const ADMIN_PASSWORD_SERVER = "br silva";
+const ADMIN_PASSWORD_SERVER = "bresilva";
 const SELLER_PASSWORD_SERVER = "1020";
 const SESSION_SECRET_SERVER = "07293d59b551087e0a7f0e97bfd9e83179a3efad00c5a55dee2bafbda9cd6780956a5618db1fe564eaa78d32f8bf6ffe";
 const ADMIN_COOKIE = "pp_admin_session";
