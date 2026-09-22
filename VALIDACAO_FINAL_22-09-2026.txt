@@ -1,0 +1,68 @@
+VALIDAÇÃO FINAL — TELA PRETA, REDIS, CONCORRÊNCIA E COMISSÕES
+Data: 22/09/2026
+
+1) CAUSA / PROTEÇÃO DA TELA PRETA
+- A grande mudança adicionou `Commissions.jsx` ao caminho de importação inicial do App.
+- Na versão que apresentou tela preta, App.jsx importava o módulo financeiro e ícones novos de forma estática.
+- Qualquer falha de módulo/import em Commissions impedia o React de montar o painel inteiro, resultando somente no fundo escuro.
+- A versão corrigida carrega AdminCommissionsView/SellerCommissionsView por React.lazy somente quando a tela financeira é aberta.
+- O App inicial utiliza apenas os ícones já existentes no painel estável anterior.
+- main.jsx possui Error Boundary global: erro de renderização agora gera tela de diagnóstico em vez de tela totalmente vazia.
+
+2) VALIDAÇÃO DE SINTAXE
+- `node --check api/data.js`: aprovado.
+- App.jsx, Commissions.jsx e main.jsx: parse TypeScript em modo JSX sem erro sintático.
+- Busca de nomes indefinidos relevantes via TypeScript não encontrou referência equivalente ao antigo `contactId is not defined`.
+
+3) FORMULÁRIO / POLLING
+- SaleForm inicializa somente ao abrir nova venda ou ao trocar o ID da venda editada.
+- Atualizações de polling/lista de vendedores não resetam cliente, valores, observações ou parcelas já digitados.
+
+4) PAGAMENTOS / IDEMPOTÊNCIA
+- O formulário de pagamento cria um requestId por abertura e mantém esse mesmo ID após erro/retry manual.
+- O frontend reutiliza o mesmo requestId nos retries automáticos.
+- O backend verifica requestId antes de gravar.
+- Pagamento, auditoria e validação de saldo acontecem sob COMMISSION_LOCK_KEY.
+- Valor acima do saldo, zero/negativo, parcela paga ou venda cancelada são bloqueados.
+
+5) DATAS / PARCELAS
+- `addMonths` calcula primeiro ano/mês alvo e só depois limita o dia, evitando 31/02 saltar para março.
+- validISODate rejeita datas inexistentes como 2026-02-31.
+- Status financeiros são derivados por data local do painel.
+
+6) CONCORRÊNCIA FINANCEIRA
+- Escritas financeiras usam lock renovável e Redis MULTI.
+- Venda possui campo version e edição compara a versão recebida com a versão atual; alteração concorrente retorna 409.
+- Venda com pagamentos não permite reestruturar vendedor, valor da venda, comissão ou parcelas.
+
+7) PIPELINE REDIS
+- Leituras de vendas, parcelas, pagamentos, auditoria, estatísticas e resumos relevantes verificam erro individual retornado pelo pipeline.
+- Falha de leitura financeira gera erro; não é convertida silenciosamente em lista/hash vazio.
+
+8) BACKUP / RESTAURAÇÃO
+- Backup bloqueia novas gravações por janela curta, espera locks em andamento e somente então captura snapshot.
+- Backup financeiro verifica cada resultado do pipeline.
+- Novo backup é confirmado antes da remoção do anterior.
+- Backup é validado estruturalmente antes de restauração.
+- Antes de aplicar restauração, é criado snapshot de rollback do estado atual.
+- Se aplicação falhar, o servidor tenta reaplicar automaticamente o snapshot anterior.
+- Maintenance e locks possuem TTL/heartbeat para operações longas.
+
+9) TELEFONE / EXCLUSÃO
+- Exclusão e atualização do índice global de telefone são coordenadas sob lock de importação + lock da cidade.
+- Quando contato já foi removido por uma tentativa anterior, retry procura e corrige entradas órfãs do índice.
+- Importação continua protegida contra telefone duplicado globalmente.
+
+10) SEGURANÇA FRONTEND
+- Senhas administrativas não foram adicionadas a src/App.jsx, src/Commissions.jsx ou index.html.
+- Ações financeiras de escrita continuam exigindo requireAdmin no servidor.
+- Acesso 2 recebe somente as comissões do sellerId derivado da sessão/estado validado no servidor.
+
+11) OOM / CRESCIMENTO
+- Backups continuam limitados.
+- Auditoria financeira continua limitada (10.000 eventos) para não crescer indefinidamente.
+- ensureRoomForLargeValue continua protegendo gravações grandes e priorizando dados de produção.
+
+12) LIMITAÇÃO DE TESTE DO AMBIENTE
+- O build Vite completo não foi declarado como concluído porque a instalação npm do ambiente está incompleta e `vite` não está disponível em node_modules/.bin.
+- A validação realizada foi: Node syntax check + parser TypeScript JSX + verificações estáticas específicas dos fluxos modificados.
