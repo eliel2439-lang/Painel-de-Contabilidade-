@@ -1,0 +1,25 @@
+VALIDAÇÃO — PORTAL INDIVIDUAL DE COMISSÕES
+
+Implementado:
+- Tela inicial com 3 entradas: Acesso 1, Acesso 2 e Comissões.
+- Portal de Comissões com login + senha individual, sem lista pública de vendedores.
+- Configuração dos acessos dentro do Acesso 1 > Controle de Comissões.
+- Login vinculado ao ID interno do vendedor, não ao nome exibido.
+- Senha armazenada somente como hash com salt; a senha salva nunca volta ao navegador.
+- Login único por vendedor, com opção de ativar/bloquear e trocar senha.
+- Sessão exclusiva do Portal de Comissões via cookie HttpOnly.
+- Servidor filtra vendas, parcelas e pagamentos pelo sellerId da sessão.
+- Alterar URL/parâmetros não permite consultar outro vendedor.
+- Troca de login/senha/status invalida sessões antigas daquele acesso.
+- Remover/desativar vendedor bloqueia também o acesso dele às comissões.
+- Portal mostra vendas do mês/ano/total, quantidade de vendas, comissão do mês/total,
+  recebido, a receber, vencidas, calendário, parcelas e histórico de vendas.
+
+Validações locais executadas:
+- api/data.js: node --check OK.
+- src/App.jsx, src/Commissions.jsx e src/main.jsx: parsing JSX/JS OK via TypeScript noEmit/noResolve.
+
+Observação:
+- O build completo do Vite depende da instalação das dependências do package-lock.
+  O ambiente local de validação ficou sem acesso ao registry NPM, então a checagem foi feita
+  por parsing estático dos arquivos alterados e validação sintática do backend.

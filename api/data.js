@@ -62,6 +62,7 @@ const SELLER_PASSWORD_SERVER = "1020";
 const SESSION_SECRET_SERVER = "07293d59b551087e0a7f0e97bfd9e83179a3efad00c5a55dee2bafbda9cd6780956a5618db1fe564eaa78d32f8bf6ffe";
 const ADMIN_COOKIE = "pp_admin_session";
 const SELLER_COOKIE = "pp_seller_session";
+const COMMISSION_COOKIE = "pp_commission_session";
 const ADMIN_LOGIN_WINDOW_SEC = 15 * 60;
 const ADMIN_LOGIN_MAX_FAILS = 8;
 const UNMARK_WINDOW_MS = 2 * 60 * 60 * 1000;
@@ -269,6 +270,7 @@ function defaultMeta() {
     senhasEstado: {},
     metasVendedor: {}, // sellerId -> meta
     metaAlteracoesVendedor: {}, // sellerId -> [{dia,valor,ts}]
+    commissionAccess: {}, // sellerId -> {login,loginKey,passwordSalt,passwordHash,active,version,updatedAt}
     createdAt: now(),
     updatedAt: now(),
   };
@@ -695,6 +697,9 @@ function adminCookie(req) {
 function sellerCookie(req) {
   return parseCookies(req)[SELLER_COOKIE] || "";
 }
+function commissionCookie(req) {
+  return parseCookies(req)[COMMISSION_COOKIE] || "";
+}
 function appendSetCookie(res, value) {
   const current = res.getHeader?.("Set-Cookie");
   if (!current) res.setHeader("Set-Cookie", value);
@@ -721,6 +726,33 @@ function clearSellerCookie(req, res) {
   const secure = proto === "https" ? "; Secure" : "";
   appendSetCookie(res, `${SELLER_COOKIE}=; Path=/; HttpOnly; SameSite=Strict; Max-Age=0${secure}`);
 }
+function setCommissionCookie(req, res, token) {
+  const proto = String(req.headers?.["x-forwarded-proto"] || "https").split(",")[0].trim().toLowerCase();
+  const secure = proto === "https" ? "; Secure" : "";
+  appendSetCookie(res, `${COMMISSION_COOKIE}=${encodeURIComponent(token)}; Path=/; HttpOnly; SameSite=Strict${secure}`);
+}
+function clearCommissionCookie(req, res) {
+  const proto = String(req.headers?.["x-forwarded-proto"] || "https").split(",")[0].trim().toLowerCase();
+  const secure = proto === "https" ? "; Secure" : "";
+  appendSetCookie(res, `${COMMISSION_COOKIE}=; Path=/; HttpOnly; SameSite=Strict; Max-Age=0${secure}`);
+}
+
+function commissionLoginKey(raw) {
+  return normalizeName(raw).toLocaleLowerCase("pt-BR");
+}
+function commissionPasswordHash(password, salt) {
+  return createHmac("sha256", tokenSecret()).update(`${salt}\0${String(password || "")}`).digest("hex");
+}
+function commissionAccessList(meta) {
+  return activeSellers(meta).map((seller) => {
+    const access = meta.commissionAccess?.[seller.id] || null;
+    return {
+      sellerId: seller.id, seller: seller.name,
+      login: access?.login || "", active: Boolean(access?.active),
+      configured: Boolean(access?.passwordHash && access?.loginKey), updatedAt: access?.updatedAt || null,
+    };
+  });
+}
 
 function issueAdmin(meta) {
   return signPayload({ type: "admin", v: meta.adminVersion || 1, iat: now(), exp: now() + TOKEN_TTL_MS });
@@ -730,6 +762,10 @@ function issueSeller() {
   // estatísticas vem exclusivamente do vendedor atribuído ao estado depois que
   // a senha daquele estado é validada.
   return signPayload({ type: "seller", iat: now(), exp: now() + TOKEN_TTL_MS });
+}
+function issueCommission(meta, sellerId) {
+  const access = meta.commissionAccess?.[sellerId] || {};
+  return signPayload({ type: "commission", sellerId, v: Number(access.version || 1), iat: now(), exp: now() + TOKEN_TTL_MS });
 }
 function issueState(meta, seg, uf, sellerId) {
   const k = assignmentKey(seg, uf);
@@ -754,6 +790,15 @@ function validateSession(meta, req) {
   // nenhum estado sozinho; cada estado exige sua própria senha.
   const sellerPayload = verifyTokenRaw(sellerCookie(req));
   if (sellerPayload?.type === "seller") return sellerPayload;
+
+  // Portal de comissões: sessão própria e amarrada ao sellerId. Mesmo que o
+  // navegador altere URLs ou parâmetros, o servidor filtra pelo vendedor do token.
+  const commissionPayloadToken = verifyTokenRaw(commissionCookie(req));
+  if (commissionPayloadToken?.type === "commission" && commissionPayloadToken.sellerId) {
+    const seller = sellerById(meta, commissionPayloadToken.sellerId);
+    const access = meta.commissionAccess?.[commissionPayloadToken.sellerId];
+    if (seller?.active && access?.active && Number(commissionPayloadToken.v || 0) === Number(access.version || 1)) return commissionPayloadToken;
+  }
   return null;
 }
 function requireAdmin(meta, req) {
@@ -918,6 +963,7 @@ function frontendAdminFields(meta, stats, results) {
     metaAlteracoesVendedor: goalHistory,
     estatisticasMensagens: mapStatsForFrontend(meta, stats, null),
     resultadosProspeccao: mapResultsForFrontend(meta, results, null), // inclui ex-vendedores no histórico
+    commissionAccesses: commissionAccessList(meta),
   };
 }
 
@@ -985,6 +1031,7 @@ async function bootstrap(client, meta, session) {
     enviosMensagens: [],
     estatisticasMensagens: { porVendedor: {}, totalPorDia: {} },
     resultadosProspeccao: {},
+    commissionAccesses: isAdmin ? commissionAccessList(meta) : [],
     _rev: meta.updatedAt || null,
     _storageVersion: 4,
   };
@@ -1533,6 +1580,11 @@ export default async function handler(req, res) {
           res.status(200).json(commissionPayload(meta, store, null, true));
           return;
         }
+        if (session.type === "commission" && session.sellerId) {
+          const store = await withLock(client, COMMISSION_LOCK_KEY, () => readCommissionStore(client, session.sellerId, false), { ttl: 15000, retries: 80 });
+          res.status(200).json(commissionPayload(meta, store, session.sellerId, false));
+          return;
+        }
         const seg = String(req.query?.seg || "");
         const uf = String(req.query?.uf || "").toUpperCase();
         const stateSession = requireStateOrAdmin(meta, req, seg, uf);
@@ -1594,6 +1646,7 @@ export default async function handler(req, res) {
       await client.del(failKey);
       const token = issueAdmin(meta);
       clearSellerCookie(req, res);
+      clearCommissionCookie(req, res);
       setAdminCookie(req, res, token);
       const data = await bootstrap(client, meta, { type: "admin", v: meta.adminVersion || 1 });
       res.status(200).json({ ok: true, data, session: { type: "admin" } });
@@ -1619,6 +1672,7 @@ export default async function handler(req, res) {
       }
       await client.del(failKey);
       clearAdminCookie(req, res);
+      clearCommissionCookie(req, res);
       setSellerCookie(req, res, issueSeller());
       const payload = { type: "seller" };
       const data = await bootstrap(client, meta, payload);
@@ -1626,9 +1680,49 @@ export default async function handler(req, res) {
       return;
     }
 
+
+    if (action === "login_commission") {
+      const login = normalizeName(body.login || "");
+      const password = String(body.password || "");
+      if (!login || !password) { res.status(400).json({ error: "Informe login e senha." }); return; }
+      const key = commissionLoginKey(login);
+      const entry = Object.entries(meta.commissionAccess || {}).find(([, access]) => access?.active && access?.loginKey === key);
+      const sellerId = entry?.[0] || null;
+      const access = entry?.[1] || null;
+      const seller = sellerId ? sellerById(meta, sellerId) : null;
+
+      const ip = String(req.headers?.["x-forwarded-for"] || req.headers?.["x-real-ip"] || "unknown").split(",")[0].trim().slice(0, 120);
+      const ipHash = createHmac("sha256", SESSION_SECRET_SERVER).update(ip).digest("hex").slice(0, 20);
+      const loginHash = createHmac("sha256", SESSION_SECRET_SERVER).update(key).digest("hex").slice(0, 16);
+      const failKey = `${ROOT}:login:commission:${ipHash}:${loginHash}`;
+      const fails = num(await client.get(failKey));
+      if (fails >= ADMIN_LOGIN_MAX_FAILS) { res.status(429).json({ error: "Muitas tentativas. Aguarde alguns minutos e tente novamente." }); return; }
+
+      let ok = false;
+      if (seller?.active && access?.active && access?.passwordSalt && access?.passwordHash) {
+        const suppliedHash = commissionPasswordHash(password, access.passwordSalt);
+        const a = Buffer.from(suppliedHash);
+        const b = Buffer.from(String(access.passwordHash));
+        ok = a.length === b.length && timingSafeEqual(a, b);
+      }
+      if (!ok) {
+        const count = await client.incr(failKey);
+        if (count === 1) await client.expire(failKey, ADMIN_LOGIN_WINDOW_SEC);
+        res.status(401).json({ error: "Login ou senha incorretos." }); return;
+      }
+      await client.del(failKey);
+      clearAdminCookie(req, res);
+      clearSellerCookie(req, res);
+      setCommissionCookie(req, res, issueCommission(meta, sellerId));
+      const store = await withLock(client, COMMISSION_LOCK_KEY, () => readCommissionStore(client, sellerId, false), { ttl: 15000, retries: 80 });
+      res.status(200).json({ ok: true, session: { type: "commission" }, commissions: commissionPayload(meta, store, sellerId, false) });
+      return;
+    }
+
     if (action === "logout_session" || action === "logout_admin") {
       clearAdminCookie(req, res);
       clearSellerCookie(req, res);
+      clearCommissionCookie(req, res);
       res.status(200).json({ ok: true });
       return;
     }
@@ -1973,6 +2067,9 @@ export default async function handler(req, res) {
         const seller = sellerByName(m, name);
         if (!seller) return m;
         seller.active = false;
+        if (m.commissionAccess?.[seller.id]) {
+          m.commissionAccess[seller.id] = { ...m.commissionAccess[seller.id], active: false, version: Number(m.commissionAccess[seller.id].version || 1) + 1, updatedAt: now() };
+        }
         for (const [k, id] of Object.entries(m.atribuicoes || {})) {
           if (id === seller.id) {
             delete m.atribuicoes[k];
@@ -2022,6 +2119,38 @@ export default async function handler(req, res) {
       const value = clampInt(body.value);
       const next = await writeMeta(client, (m) => { m.meta = value; return m; });
       res.status(200).json({ ok: true, meta: next.meta });
+      return;
+    }
+
+
+    if (action === "set_commission_access") {
+      requireAdmin(meta, req);
+      const seller = sellerByName(meta, body.seller || "");
+      if (!seller?.active) { res.status(404).json({ error: "vendedor não encontrado" }); return; }
+      const login = normalizeName(body.login || "").slice(0, 80);
+      const loginKey = commissionLoginKey(login);
+      const password = String(body.password || "");
+      const active = body.active !== false;
+      if (!login || login.length < 3) { res.status(400).json({ error: "o login precisa ter pelo menos 3 caracteres" }); return; }
+      if (/\s/.test(login)) { res.status(400).json({ error: "o login não pode conter espaços" }); return; }
+      const duplicate = Object.entries(meta.commissionAccess || {}).find(([id, access]) => id !== seller.id && access?.loginKey === loginKey);
+      if (duplicate) { res.status(409).json({ error: "este login já está sendo usado por outro vendedor" }); return; }
+      const current = meta.commissionAccess?.[seller.id] || null;
+      if (!current?.passwordHash && password.length < 4) { res.status(400).json({ error: "defina uma senha com pelo menos 4 caracteres" }); return; }
+      if (password && password.length < 4) { res.status(400).json({ error: "a nova senha precisa ter pelo menos 4 caracteres" }); return; }
+
+      const next = await writeMeta(client, (m) => {
+        m.commissionAccess ||= {};
+        const old = m.commissionAccess[seller.id] || {};
+        const salt = password ? randomUUID().replace(/-/g, "") : old.passwordSalt;
+        const hash = password ? commissionPasswordHash(password, salt) : old.passwordHash;
+        m.commissionAccess[seller.id] = {
+          login, loginKey, passwordSalt: salt, passwordHash: hash, active,
+          version: Number(old.version || 0) + 1, updatedAt: now(),
+        };
+        return m;
+      });
+      res.status(200).json({ ok: true, commissionAccesses: commissionAccessList(next) });
       return;
     }
 

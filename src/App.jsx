@@ -148,13 +148,14 @@ function normalizarSegmentos(parsed) {
     enviosMensagens: parsed.enviosMensagens || [],
     estatisticasMensagens: parsed.estatisticasMensagens || { porVendedor: {}, totalPorDia: {} },
     resultadosProspeccao: parsed.resultadosProspeccao || {},
+    commissionAccesses: parsed.commissionAccesses || [],
     _rev: parsed._rev ?? null,
     _storageVersion: parsed._storageVersion || 4,
   };
 }
 
 function emptyData() {
-  return normalizarSegmentos({ segmentos: {}, ordemSegmentos: [], vendedores: [], atribuicoes: {}, historico: [], meta: 0, mensagens: {}, senhasEstado: {}, metasVendedor: {}, metaAlteracoesVendedor: {}, estatisticasMensagens: {}, resultadosProspeccao: {} });
+  return normalizarSegmentos({ segmentos: {}, ordemSegmentos: [], vendedores: [], atribuicoes: {}, historico: [], meta: 0, mensagens: {}, senhasEstado: {}, metasVendedor: {}, metaAlteracoesVendedor: {}, estatisticasMensagens: {}, resultadosProspeccao: {}, commissionAccesses: [] });
 }
 
 // A senha padrão de compatibilidade existe somente no servidor. Não colocamos
@@ -390,11 +391,12 @@ export default function PainelProspeccao() {
   const [commissionLoading, setCommissionLoading] = useState(false);
   const [commissionError, setCommissionError] = useState("");
 
-  // Dois níveis de acesso. As senhas são verificadas exclusivamente pela API e
-  // nunca ficam no HTML/React. O navegador recebe apenas cookies HttpOnly.
-  const [sessionType, setSessionType] = useState(null); // "admin" | "seller" | null
+  // Três acessos independentes. As senhas são verificadas exclusivamente pela API
+  // e nunca ficam no HTML/React. O navegador recebe apenas cookies HttpOnly.
+  const [sessionType, setSessionType] = useState(null); // "admin" | "seller" | "commission" | null
   const adminSession = sessionType === "admin";
   const sellerSession = sessionType === "seller";
+  const commissionSession = sessionType === "commission";
   const adminToken = ""; // cookie HttpOnly autentica o Acesso 1.
   const painelGeralOk = adminSession;
   const [stateTokens, setStateTokens] = useState(() => {
@@ -406,6 +408,9 @@ export default function PainelProspeccao() {
   const [erroSenhaGeral, setErroSenhaGeral] = useState("");
   const [senhaVendedorInput, setSenhaVendedorInput] = useState("");
   const [erroSenhaVendedor, setErroSenhaVendedor] = useState("");
+  const [commissionLoginInput, setCommissionLoginInput] = useState("");
+  const [commissionPasswordInput, setCommissionPasswordInput] = useState("");
+  const [commissionLoginError, setCommissionLoginError] = useState("");
   const [modoAcesso, setModoAcesso] = useState("seller");
   const chaveEstadoAtual = ufSelecionado ? chaveAtrib(segmentoAtual, ufSelecionado) : "";
   const estadoDesbloqueado = !!(adminSession || (sellerSession && chaveEstadoAtual && stateTokens[chaveEstadoAtual]));
@@ -492,23 +497,6 @@ export default function PainelProspeccao() {
     if (painelGeralOk) return "";
     return stateTokens[chaveAtrib(seg, uf)] || "";
   }, [painelGeralOk, stateTokens]);
-
-  const carregarComissoes = useCallback(async (seg = "", uf = "") => {
-    setCommissionLoading(true);
-    setCommissionError("");
-    try {
-      const token = painelGeralOk ? "" : tokenEstado(seg, uf);
-      const query = painelGeralOk ? "" : `&seg=${encodeURIComponent(seg)}&uf=${encodeURIComponent(uf)}`;
-      const res = await apiRequest(`/api/data?mode=commissions${query}`, { token, timeoutMs: 20000 });
-      setCommissionData(res || { sales: [], installments: [], payments: [], audit: [], seller: "" });
-      return res;
-    } catch (e) {
-      setCommissionError(String(e?.message || e));
-      throw e;
-    } finally {
-      setCommissionLoading(false);
-    }
-  }, [painelGeralOk, tokenEstado]);
 
   const carregarEstado = useCallback(async (seg, uf, tokenOverride = "") => {
     const token = tokenOverride || tokenEstado(seg, uf);
@@ -686,6 +674,21 @@ export default function PainelProspeccao() {
       setErroSenhaEstado("");
     } catch (e) {
       setErroSenhaVendedor(String(e?.message || "Acesso incorreto."));
+    }
+  };
+
+  const desbloquearComissao = async () => {
+    setCommissionLoginError("");
+    try {
+      const res = await apiRequest("/api/data", { method: "POST", body: { action: "login_commission", login: commissionLoginInput, password: commissionPasswordInput } });
+      setSessionType("commission");
+      setCommissionData(res.commissions || { sales: [], installments: [], payments: [], audit: [], seller: "" });
+      setCommissionError("");
+      setCommissionPasswordInput("");
+      setTela("minhas-comissoes");
+      commitData(emptyData());
+    } catch (e) {
+      setCommissionLoginError(String(e?.message || "Login ou senha incorretos."));
     }
   };
 
@@ -986,33 +989,9 @@ export default function PainelProspeccao() {
       metaAlteracoesVendedor: admin.metaAlteracoesVendedor ?? current.metaAlteracoesVendedor,
       estatisticasMensagens: admin.estatisticasMensagens ? mergeStats(current.estatisticasMensagens, admin.estatisticasMensagens) : current.estatisticasMensagens,
       resultadosProspeccao: admin.resultadosProspeccao ?? current.resultadosProspeccao,
+      commissionAccesses: admin.commissionAccesses ?? current.commissionAccesses,
     });
   }, [commitData]);
-
-  if (loading || !data) {
-    return (
-      <div style={{ background: "#14181f" }} className="min-h-screen flex items-center justify-center text-slate-400">
-        <Loader2 className="animate-spin mr-2" size={18} /> Carregando painel…
-      </div>
-    );
-  }
-
-  if (!sessionType) {
-    return (
-      <TelaAcessos
-        modo={modoAcesso}
-        setModo={setModoAcesso}
-        senhaAdmin={senhaGeralInput}
-        setSenhaAdmin={setSenhaGeralInput}
-        erroAdmin={erroSenhaGeral}
-        onAdmin={desbloquearGeral}
-        senhaVendedor={senhaVendedorInput}
-        setSenhaVendedor={setSenhaVendedorInput}
-        erroVendedor={erroSenhaVendedor}
-        onVendedor={desbloquearVendedor}
-      />
-    );
-  }
 
   const addSegmento = async () => {
     const nome = novoSegmento.trim();
@@ -1247,6 +1226,32 @@ export default function PainelProspeccao() {
     return res;
   };
 
+  const carregarComissoes = useCallback(async (seg = "", uf = "") => {
+    setCommissionLoading(true);
+    setCommissionError("");
+    try {
+      const directPortal = painelGeralOk || commissionSession;
+      const token = directPortal ? "" : tokenEstado(seg, uf);
+      const query = directPortal ? "" : `&seg=${encodeURIComponent(seg)}&uf=${encodeURIComponent(uf)}`;
+      const res = await apiRequest(`/api/data?mode=commissions${query}`, { token, timeoutMs: 20000 });
+      setCommissionData(res || { sales: [], installments: [], payments: [], audit: [], seller: "" });
+      return res;
+    } catch (e) {
+      setCommissionError(String(e?.message || e));
+      throw e;
+    } finally {
+      setCommissionLoading(false);
+    }
+  }, [painelGeralOk, commissionSession, tokenEstado]);
+
+  const salvarAcessoComissao = async (payload) => {
+    if (!painelGeralOk) throw new Error("somente o Acesso 1 pode configurar acessos de comissão");
+    const res = await executarAcao("set_commission_access", payload, adminToken, { retries: 1, timeoutMs: 20000 });
+    const current = dataRef.current || emptyData();
+    commitData({ ...current, commissionAccesses: res.commissionAccesses || [] });
+    return res;
+  };
+
   const salvarVendaComissao = async (payload) => {
     if (!painelGeralOk) throw new Error("somente o Acesso 1 pode cadastrar ou editar comissões");
     const res = await executarAcao("save_commission_sale", payload, adminToken, { retries: 1, timeoutMs: 25000 });
@@ -1278,6 +1283,11 @@ export default function PainelProspeccao() {
     return res;
   };
 
+  useEffect(() => {
+    if (!commissionSession) return;
+    carregarComissoes().catch(() => {});
+  }, [commissionSession, carregarComissoes]);
+
   const abrirComissoesAdmin = async () => {
     if (!painelGeralOk) return;
     setTela("comissoes");
@@ -1294,6 +1304,70 @@ export default function PainelProspeccao() {
     try { await carregarComissoes(segmentoAtual, ufSelecionado); } catch {}
   };
 
+
+  if (loading || !data) {
+    return (
+      <div style={{ background: "#14181f" }} className="min-h-screen flex items-center justify-center text-slate-400">
+        <Loader2 className="animate-spin mr-2" size={18} /> Carregando painel…
+      </div>
+    );
+  }
+
+  if (!sessionType) {
+    return (
+      <TelaAcessos
+        modo={modoAcesso}
+        setModo={setModoAcesso}
+        senhaAdmin={senhaGeralInput}
+        setSenhaAdmin={setSenhaGeralInput}
+        erroAdmin={erroSenhaGeral}
+        onAdmin={desbloquearGeral}
+        senhaVendedor={senhaVendedorInput}
+        setSenhaVendedor={setSenhaVendedorInput}
+        erroVendedor={erroSenhaVendedor}
+        onVendedor={desbloquearVendedor}
+        commissionLogin={commissionLoginInput}
+        setCommissionLogin={setCommissionLoginInput}
+        commissionPassword={commissionPasswordInput}
+        setCommissionPassword={setCommissionPasswordInput}
+        commissionError={commissionLoginError}
+        onCommission={desbloquearComissao}
+      />
+    );
+  }
+
+
+  if (commissionSession) {
+    return (
+      <div style={{ background: "#14181f", fontFamily: "'Inter', system-ui, sans-serif" }} className="min-h-screen text-slate-100">
+        <style>{`
+          @import url('https://fonts.googleapis.com/css2?family=JetBrains+Mono:wght@400;600;700&family=Inter:wght@400;500;600;700&display=swap');
+          .mono { font-family: 'JetBrains Mono', ui-monospace, monospace; }
+          input:focus, select:focus, textarea:focus, button:focus-visible { outline: 2px solid #e0a458; outline-offset: 1px; }
+        `}</style>
+        <div className="px-5 py-4 sm:px-8 sm:py-6" style={{ borderBottom: "1px solid #232a36" }}>
+          <div className="max-w-7xl mx-auto flex items-center justify-between gap-3 flex-wrap">
+            <div>
+              <div className="mono text-[11px] tracking-widest text-[#e0a458] uppercase mb-1">Portal de comissões</div>
+              <div className="text-lg sm:text-xl font-semibold">{commissionData.seller || "Vendedor"}</div>
+              <div className="text-xs text-slate-500 mt-1">Acesso individual · somente seus dados financeiros</div>
+            </div>
+            <button onClick={sairDoPainel} className="px-3 py-2 rounded-xl text-xs font-semibold" style={{ background: "#1c222c", border: "1px solid #2c3444", color: "#c3cad6" }}>Sair</button>
+          </div>
+        </div>
+        <div className="px-5 py-5 sm:px-8 sm:py-7 max-w-7xl mx-auto">
+          {commissionError && <div className="mb-4 rounded-xl px-4 py-3 text-xs text-[#f0a89f]" style={{ background: "#2a1c1c", border: "1px solid #7f3d38" }}>{commissionError}</div>}
+          <SellerCommissionsView
+            data={commissionData}
+            loading={commissionLoading}
+            onBack={sairDoPainel}
+            onRefresh={() => carregarComissoes()}
+            backLabel="sair do portal"
+          />
+        </div>
+      </div>
+    );
+  }
 
   // No Acesso 2 os estados aparecem normalmente; a barreira real é a senha
   // individual de cada estado, validada no servidor.
@@ -1505,6 +1579,8 @@ export default function PainelProspeccao() {
                 onPay={pagarParcelaComissao}
                 onCorrectPayment={corrigirPagamentoComissao}
                 onCancelSale={cancelarVendaComissao}
+                commissionAccesses={data.commissionAccesses || []}
+                onSaveCommissionAccess={salvarAcessoComissao}
               />
             </div>
           ) : <SegmentosOverview data={data} resumoPorSegmento={resumoPorSegmento} onEscolher={(seg) => { setSegmentoAtual(seg); setTela("mapa"); setUfSelecionado(null); setFiltro(""); }} novoSegmento="" setNovoSegmento={() => {}} mostraNovoSegmento={false} setMostraNovoSegmento={() => {}} addSegmento={() => {}} canManage={false} />
@@ -1673,17 +1749,20 @@ const FORMATO_STYLE = {
   "Google Perfil da Empresa": { color: "#7aa2c9", bg: "#1e2733", short: "Google Perfil" },
 };
 
-function TelaAcessos({ modo, setModo, senhaAdmin, setSenhaAdmin, erroAdmin, onAdmin, senhaVendedor, setSenhaVendedor, erroVendedor, onVendedor }) {
+function TelaAcessos({ modo, setModo, senhaAdmin, setSenhaAdmin, erroAdmin, onAdmin, senhaVendedor, setSenhaVendedor, erroVendedor, onVendedor, commissionLogin, setCommissionLogin, commissionPassword, setCommissionPassword, commissionError, onCommission }) {
   const admin = modo === "admin";
+  const seller = modo === "seller";
+  const commission = modo === "commission";
   return (
     <div style={{ background: "#14181f", fontFamily: "'Inter', system-ui, sans-serif" }} className="min-h-screen flex items-center justify-center px-4 py-8 text-slate-100">
       <div className="w-full max-w-md rounded-2xl p-5 sm:p-7" style={{ background: "#191d25", border: "1px solid #2c3444" }}>
         <div className="mono text-[11px] tracking-widest text-[#e0a458] uppercase mb-1">Painel de prospecção</div>
         <h1 className="text-2xl font-semibold text-slate-50 mb-1">Escolha seu acesso</h1>
-        <p className="text-sm text-slate-500 mb-6">O acesso é validado no servidor. Nenhuma senha fica gravada no HTML.</p>
-        <div className="grid grid-cols-2 gap-2 mb-5">
-          <button onClick={() => setModo("admin")} className="py-3 rounded-xl text-sm font-semibold" style={{ background: admin ? "#e0a458" : "#1c222c", color: admin ? "#14181f" : "#c3cad6", border: `1px solid ${admin ? "#e0a458" : "#2c3444"}` }}>Acesso 1</button>
-          <button onClick={() => setModo("seller")} className="py-3 rounded-xl text-sm font-semibold" style={{ background: !admin ? "#e0a458" : "#1c222c", color: !admin ? "#14181f" : "#c3cad6", border: `1px solid ${!admin ? "#e0a458" : "#2c3444"}` }}>Acesso 2</button>
+        <p className="text-sm text-slate-500 mb-6">As credenciais são validadas no servidor. Nenhuma senha fica gravada no HTML.</p>
+        <div className="grid grid-cols-3 gap-2 mb-5">
+          <button onClick={() => setModo("admin")} className="py-3 rounded-xl text-xs sm:text-sm font-semibold" style={{ background: admin ? "#e0a458" : "#1c222c", color: admin ? "#14181f" : "#c3cad6", border: `1px solid ${admin ? "#e0a458" : "#2c3444"}` }}>Acesso 1</button>
+          <button onClick={() => setModo("seller")} className="py-3 rounded-xl text-xs sm:text-sm font-semibold" style={{ background: seller ? "#e0a458" : "#1c222c", color: seller ? "#14181f" : "#c3cad6", border: `1px solid ${seller ? "#e0a458" : "#2c3444"}` }}>Acesso 2</button>
+          <button onClick={() => setModo("commission")} className="py-3 rounded-xl text-xs sm:text-sm font-semibold" style={{ background: commission ? "#e0a458" : "#1c222c", color: commission ? "#14181f" : "#c3cad6", border: `1px solid ${commission ? "#e0a458" : "#2c3444"}` }}>Comissões</button>
         </div>
         {admin ? (
           <form onSubmit={(e) => { e.preventDefault(); onAdmin(); }}>
@@ -1692,13 +1771,23 @@ function TelaAcessos({ modo, setModo, senhaAdmin, setSenhaAdmin, erroAdmin, onAd
             {erroAdmin && <div className="text-xs text-[#e0736a] mb-3">{erroAdmin}</div>}
             <button className="w-full py-3 rounded-xl font-semibold" style={{ background: "#e0a458", color: "#14181f" }}>Entrar no Acesso 1</button>
           </form>
-        ) : (
+        ) : seller ? (
           <form onSubmit={(e) => { e.preventDefault(); onVendedor(); }}>
             <div className="text-xs text-slate-500 mb-1.5">Senha do Acesso 2</div>
             <input type="password" autoComplete="current-password" value={senhaVendedor} onChange={(e) => setSenhaVendedor(e.target.value)} className="w-full px-3 py-3 rounded-xl text-slate-100 mb-3" style={{ background: "#14181f", border: "1px solid #2c3444" }} autoFocus />
             <div className="text-[11px] text-slate-500 mb-3">Depois de entrar, cada estado pede a própria senha. O vendedor é identificado automaticamente pelo estado.</div>
             {erroVendedor && <div className="text-xs text-[#e0736a] mb-3">{erroVendedor}</div>}
             <button className="w-full py-3 rounded-xl font-semibold" style={{ background: "#e0a458", color: "#14181f" }}>Entrar no Acesso 2</button>
+          </form>
+        ) : (
+          <form onSubmit={(e) => { e.preventDefault(); onCommission(); }}>
+            <div className="text-xs text-slate-500 mb-1.5">Login do vendedor</div>
+            <input type="text" autoComplete="username" value={commissionLogin} onChange={(e) => setCommissionLogin(e.target.value)} className="w-full px-3 py-3 rounded-xl text-slate-100 mb-3" style={{ background: "#14181f", border: "1px solid #2c3444" }} autoFocus />
+            <div className="text-xs text-slate-500 mb-1.5">Senha</div>
+            <input type="password" autoComplete="current-password" value={commissionPassword} onChange={(e) => setCommissionPassword(e.target.value)} className="w-full px-3 py-3 rounded-xl text-slate-100 mb-3" style={{ background: "#14181f", border: "1px solid #2c3444" }} />
+            <div className="text-[11px] text-slate-500 mb-3">Este acesso abre somente suas vendas, comissões, parcelas e pagamentos.</div>
+            {commissionError && <div className="text-xs text-[#e0736a] mb-3">{commissionError}</div>}
+            <button className="w-full py-3 rounded-xl font-semibold" style={{ background: "#e0a458", color: "#14181f" }}>Entrar em Comissões</button>
           </form>
         )}
       </div>
