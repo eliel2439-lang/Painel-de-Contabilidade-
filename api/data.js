@@ -497,53 +497,15 @@ async function readResults(client) {
 }
 
 function moneyCents(value) {
-  if (typeof value === "number") {
-    if (!Number.isFinite(value)) return 0;
-    return Math.max(0, Math.round(value * 100));
-  }
-  let raw = String(value ?? "").trim().replace(/\s+/g, "").replace(/^R\$/i, "");
-  if (!raw) return 0;
-  // Aceita tanto 1234.56 quanto os formatos brasileiros 1234,56 e 1.234,56.
-  // Quando ponto e vírgula aparecem juntos, o separador que aparece por último é
-  // tratado como decimal; os demais são separadores de milhar.
-  const lastComma = raw.lastIndexOf(",");
-  const lastDot = raw.lastIndexOf(".");
-  if (lastComma >= 0 && lastDot >= 0) {
-    if (lastComma > lastDot) raw = raw.replace(/\./g, "").replace(",", ".");
-    else raw = raw.replace(/,/g, "");
-  } else if (lastComma >= 0) {
-    raw = raw.replace(/\./g, "").replace(",", ".");
-  } else if ((raw.match(/\./g) || []).length > 1) {
-    const parts = raw.split(".");
-    const decimal = parts.pop();
-    raw = parts.join("") + (decimal?.length === 2 ? `.${decimal}` : decimal || "");
-  }
-  const parsed = Number(raw);
-  if (!Number.isFinite(parsed)) return 0;
-  return Math.max(0, Math.round(parsed * 100));
+  const n = Number(String(value ?? "0").replace(",", "."));
+  if (!Number.isFinite(n)) return 0;
+  return Math.max(0, Math.round(n * 100));
 }
 function moneyFromCents(cents) {
   return Math.round(Number(cents || 0)) / 100;
 }
 function validISODate(value) {
-  const raw = String(value || "");
-  const m = /^(\d{4})-(\d{2})-(\d{2})$/.exec(raw);
-  if (!m) return false;
-  const y = Number(m[1]), mo = Number(m[2]), d = Number(m[3]);
-  if (y < 2000 || y > 2200 || mo < 1 || mo > 12 || d < 1) return false;
-  const maxDay = new Date(y, mo, 0, 12, 0, 0).getDate();
-  return d <= maxDay;
-}
-
-function pipelineValue(rows, index, label = "pipeline Redis") {
-  const row = rows?.[index];
-  if (!row) throw new Error(`${label}: resposta ausente`);
-  if (row[0]) {
-    const e = row[0] instanceof Error ? row[0] : new Error(String(row[0]));
-    e.message = `${label}: ${e.message}`;
-    throw e;
-  }
-  return row[1];
+  return /^\d{4}-\d{2}-\d{2}$/.test(String(value || ""));
 }
 function sanitizeCommissionText(value, max = 500) {
   return String(value || "").trim().slice(0, max);
@@ -557,7 +519,7 @@ function commissionAuditEvent(action, entityType, entityId, before = null, after
 }
 async function appendCommissionAudit(client, tx, event) {
   tx.lpush(COMMISSION_AUDIT_KEY, JSON.stringify(event));
-  tx.ltrim(COMMISSION_AUDIT_KEY, 0, 9999);
+  tx.ltrim(COMMISSION_AUDIT_KEY, 0, 1999);
 }
 async function readCommissionStore(client, sellerId = null, includeAudit = false) {
   const pipe = client.pipeline();
@@ -566,19 +528,16 @@ async function readCommissionStore(client, sellerId = null, includeAudit = false
   pipe.hgetall(COMMISSION_PAYMENTS_KEY);
   if (includeAudit) pipe.lrange(COMMISSION_AUDIT_KEY, 0, 499);
   const rows = await pipe.exec();
-  // Nunca transforma erro parcial do pipeline em coleção vazia. Em dados
-  // financeiros, "não consegui ler" precisa ser erro, e não "não existe".
-  const salesRaw = pipelineValue(rows, 0, "leitura das vendas") || {};
-  const installmentsRaw = pipelineValue(rows, 1, "leitura das parcelas") || {};
-  const paymentsRaw = pipelineValue(rows, 2, "leitura dos pagamentos") || {};
+  const salesRaw = rows?.[0]?.[1] || {};
+  const installmentsRaw = rows?.[1]?.[1] || {};
+  const paymentsRaw = rows?.[2]?.[1] || {};
   let sales = Object.values(salesRaw).map((x) => jsonParse(x, null)).filter(Boolean);
   if (sellerId) sales = sales.filter((x) => x.sellerId === sellerId);
   const saleIds = new Set(sales.map((x) => x.id));
   const installments = Object.values(installmentsRaw).map((x) => jsonParse(x, null)).filter((x) => x && saleIds.has(x.saleId));
   const installmentIds = new Set(installments.map((x) => x.id));
   const payments = Object.values(paymentsRaw).map((x) => jsonParse(x, null)).filter((x) => x && installmentIds.has(x.installmentId) && !x.voided);
-  const auditRaw = includeAudit ? (pipelineValue(rows, 3, "leitura da auditoria financeira") || []) : [];
-  const audit = auditRaw.map((x) => jsonParse(x, null)).filter(Boolean);
+  const audit = includeAudit ? (rows?.[3]?.[1] || []).map((x) => jsonParse(x, null)).filter(Boolean) : [];
   return { sales, installments, payments, audit };
 }
 function commissionPayload(meta, store, sellerId = null, includeAudit = false) {
@@ -991,11 +950,12 @@ async function bootstrap(client, meta, session) {
     }
     const summaryResults = modes.length ? await tx.exec() : [];
     modes.forEach((entry, i) => {
-      const rawSummary = pipelineValue(summaryResults, i, `resumo do estado ${entry.parsed.uf}`) || {};
+      const pair = summaryResults[i] || [null, {}];
+      if (pair?.[0]) return;
       const { parsed } = entry;
       segmentos[parsed.seg] ||= {};
       const cities = {};
-      for (const [name, raw] of Object.entries(rawSummary)) {
+      for (const [name, raw] of Object.entries(pair[1] || {})) {
         cities[name] = jsonParse(raw, publicCitySummary(defaultCity()));
       }
       segmentos[parsed.seg][parsed.uf] = cities;
@@ -1150,9 +1110,9 @@ async function readStats(client, meta, allowedSellerIds = null) {
   if (!allowedSellerIds) pipe.hgetall(STATS_TOTAL_DAYS_KEY);
   const rows = ids.length || !allowedSellerIds ? await pipe.exec() : [];
   const stats = defaultStats();
-  ids.forEach((id, i) => { stats.porVendedor[id] = parseSellerStatsHash(pipelineValue(rows, i, `estatísticas do vendedor ${id}`) || {}); });
+  ids.forEach((id, i) => { stats.porVendedor[id] = parseSellerStatsHash(rows?.[i]?.[1] || {}); });
   if (!allowedSellerIds) {
-    const totals = pipelineValue(rows, ids.length, "estatísticas totais por dia") || {};
+    const totals = rows?.[ids.length]?.[1] || {};
     for (const [day, qty] of Object.entries(totals)) if (num(qty) > 0) stats.totalPorDia[day] = num(qty);
   } else {
     for (const info of Object.values(stats.porVendedor)) {
@@ -1203,13 +1163,13 @@ async function migrateStatsStorage(client) {
 
 async function ensureNotMaintenance(client) {
   if (await client.exists(MAINTENANCE_KEY)) {
-    const e = new Error("o painel está concluindo uma operação de manutenção segura; aguarde alguns segundos");
+    const e = new Error("o painel está concluindo uma restauração administrativa; aguarde alguns segundos");
     e.statusCode = 503;
     throw e;
   }
 }
 
-async function waitForWriteLocksToDrain(client, maxWaitMs = 15000, { ignoreBackup = false } = {}) {
+async function waitForWriteLocksToDrain(client, maxWaitMs = 15000) {
   const started = now();
   while (now() - started < maxWaitMs) {
     let cursor = "0";
@@ -1219,14 +1179,13 @@ async function waitForWriteLocksToDrain(client, maxWaitMs = 15000, { ignoreBacku
       cursor = next;
       if (keys?.length) { foundCityLock = true; break; }
     } while (cursor !== "0");
-    const [metaBusy, resultsBusy, backupBusyRaw, importBusy, commissionBusy] = await Promise.all([
+    const [metaBusy, resultsBusy, backupBusy, importBusy, commissionBusy] = await Promise.all([
       client.exists(ROOT + ":lock:meta"),
       client.exists(ROOT + ":lock:results"),
       client.exists(BACKUP_LOCK_KEY),
       client.exists(IMPORT_LOCK_KEY),
       client.exists(COMMISSION_LOCK_KEY),
     ]);
-    const backupBusy = ignoreBackup ? 0 : backupBusyRaw;
     if (!foundCityLock && !metaBusy && !resultsBusy && !backupBusy && !importBusy && !commissionBusy) return true;
     await sleep(100);
   }
@@ -1313,18 +1272,13 @@ let lastBackupCheckAt = 0;
 
 async function buildBackupSnapshot(client) {
   const meta = await readMeta(client);
-  const commissionSnapshotPromise = (async () => {
+  const commissionSnapshotPromise = withLock(client, COMMISSION_LOCK_KEY, async () => {
     const tx = client.pipeline();
     tx.hgetall(COMMISSION_SALES_KEY); tx.hgetall(COMMISSION_INSTALLMENTS_KEY);
-    tx.hgetall(COMMISSION_PAYMENTS_KEY); tx.lrange(COMMISSION_AUDIT_KEY, 0, 9999);
+    tx.hgetall(COMMISSION_PAYMENTS_KEY); tx.lrange(COMMISSION_AUDIT_KEY, 0, 1999);
     const rows = await tx.exec();
-    return {
-      sales: pipelineValue(rows, 0, "backup das vendas") || {},
-      installments: pipelineValue(rows, 1, "backup das parcelas") || {},
-      payments: pipelineValue(rows, 2, "backup dos pagamentos") || {},
-      audit: pipelineValue(rows, 3, "backup da auditoria financeira") || [],
-    };
-  })();
+    return { sales: rows?.[0]?.[1] || {}, installments: rows?.[1]?.[1] || {}, payments: rows?.[2]?.[1] || {}, audit: rows?.[3]?.[1] || [] };
+  }, { ttl: 30000, retries: 160 });
   const [resultsRaw, refs, stats, commissionSnapshot] = await Promise.all([
     client.get(RESULTS_KEY), client.smembers(STATE_INDEX_KEY), readStats(client, meta), commissionSnapshotPromise,
   ]);
@@ -1344,7 +1298,7 @@ async function buildBackupSnapshot(client) {
     names.forEach((name, i) => { if (raws[i] != null) cities[ref][name] = raws[i]; });
   }
   return JSON.stringify({
-    version: 4, layout: "city-v1", metaRaw, statsRaw, resultsRaw: resultsRaw || JSON.stringify(defaultResults()), cities, createdAt: now(),
+    version: 4, layout: "city-v1", metaRaw, statsRaw, resultsRaw, cities, createdAt: now(),
     commissions: { sales: commissionSales || {}, installments: commissionInstallments || {}, payments: commissionPayments || {}, audit: commissionAudit || [] },
   });
 }
@@ -1373,33 +1327,20 @@ async function maybeBackup(client) {
   const latest = await client.lindex(BACKUP_INDEX_KEY, 0);
   const latestMs = latest ? new Date(latest).getTime() : 0;
   if (latestMs && now() - latestMs < BACKUP_INTERVAL_MS) return;
-
-  // Para o backup ser uma fotografia coerente, bloqueia novas gravações por um
-  // intervalo curto e espera as gravações já iniciadas terminarem. Leituras continuam.
-  const maintenanceToken = `backup:${randomUUID()}`;
-  const maintenanceOk = await client.set(MAINTENANCE_KEY, maintenanceToken, "PX", 2 * 60 * 1000, "NX");
-  if (maintenanceOk !== "OK") return;
   const ts = new Date().toISOString();
   try {
-    const drained = await waitForWriteLocksToDrain(client, 20000, { ignoreBackup: true });
-    if (!drained) return;
     const packed = await compact(await buildBackupSnapshot(client));
     if (!(await hasMemoryRoomForBackup(client, Buffer.byteLength(packed, "utf8")))) return;
 
-    // Primeiro confirma o NOVO backup. Só depois remove o anterior.
+    // Primeiro confirma o NOVO backup. Só depois remove o anterior. Se a rede,
+    // a Function ou o Redis falhar no meio, continuamos com o último backup bom.
     await client.set(BACKUP_PREFIX + ts, packed);
     await client.lpush(BACKUP_INDEX_KEY, ts);
     await trimBackups(client, MAX_BACKUPS);
   } catch (err) {
     if (!isOOM(err)) throw err;
+    // OOM ao criar backup nunca apaga o backup anterior nem afeta a produção.
     try { await client.del(BACKUP_PREFIX + ts); } catch {}
-  } finally {
-    try {
-      await client.eval(
-        "if redis.call('get',KEYS[1]) == ARGV[1] then return redis.call('del',KEYS[1]) else return 0 end",
-        1, MAINTENANCE_KEY, maintenanceToken,
-      );
-    } catch {}
   }
 }
 async function maybeBackupThrottled(client) {
@@ -1431,191 +1372,96 @@ function sanitizeContact(c) {
   };
 }
 
-async function scanKeys(client, pattern) {
-  let cursor = "0";
-  const out = [];
-  do {
-    const [next, keys] = await client.scan(cursor, "MATCH", pattern, "COUNT", 200);
-    cursor = next;
-    if (Array.isArray(keys) && keys.length) out.push(...keys);
-  } while (cursor !== "0");
-  return out;
-}
-
-async function deleteKeysChunked(client, keys, size = 200) {
-  for (let i = 0; i < keys.length; i += size) {
-    const chunk = keys.slice(i, i + size);
-    if (chunk.length) await client.del(...chunk);
-  }
-}
-
-function validateBackupSnapshot(snapshot) {
-  if (!snapshot || snapshot.version !== 4) throw new Error("backup inválido");
-  const meta = jsonParse(snapshot.metaRaw, null);
-  const stats = jsonParse(snapshot.statsRaw, null);
-  const results = jsonParse(snapshot.resultsRaw, null);
-  if (!meta || typeof meta !== "object") throw new Error("backup inválido: metadados ausentes");
-  if (!stats || typeof stats !== "object") throw new Error("backup inválido: estatísticas ausentes");
-  if (!results || typeof results !== "object") throw new Error("backup inválido: conversões ausentes");
-
-  if (snapshot.cities) {
-    for (const [ref, cityMap] of Object.entries(snapshot.cities || {})) {
-      if (!parseStateRef(ref) || !cityMap || typeof cityMap !== "object") throw new Error("backup inválido: estado/cidades corrompidos");
-      for (const cityRaw of Object.values(cityMap)) {
-        if (!jsonParse(cityRaw, null)) throw new Error("backup inválido: cidade corrompida");
-      }
-    }
-  } else if (snapshot.states) {
-    for (const [ref, stateRaw] of Object.entries(snapshot.states || {})) {
-      const state = jsonParse(stateRaw, null);
-      if (!parseStateRef(ref) || !state?.cidades) throw new Error("backup legado inválido");
-    }
-  } else {
-    throw new Error("backup inválido: não há cidades/estados");
-  }
-
-  if (snapshot.commissions) {
-    for (const raw of Object.values(snapshot.commissions.sales || {})) if (!jsonParse(raw, null)) throw new Error("backup inválido: venda corrompida");
-    for (const raw of Object.values(snapshot.commissions.installments || {})) if (!jsonParse(raw, null)) throw new Error("backup inválido: parcela corrompida");
-    for (const raw of Object.values(snapshot.commissions.payments || {})) if (!jsonParse(raw, null)) throw new Error("backup inválido: pagamento corrompido");
-    for (const raw of snapshot.commissions.audit || []) if (!jsonParse(raw, null)) throw new Error("backup inválido: auditoria corrompida");
-  }
-  return true;
-}
-
-async function applyBackupSnapshot(client, snapshot) {
-  validateBackupSnapshot(snapshot);
-
-  // Remove somente chaves de dados de produção. Backups e locks ficam intactos.
-  const [cityKeys, summaryKeys, sellerStatKeys, legacyStateKeys] = await Promise.all([
-    scanKeys(client, `${CITY_PREFIX}*`),
-    scanKeys(client, `${STATE_SUMMARY_PREFIX}*`),
-    scanKeys(client, `${STATS_SELLER_PREFIX}*`),
-    scanKeys(client, `${ROOT}:state:*`),
-  ]);
-  await deleteKeysChunked(client, cityKeys);
-  await deleteKeysChunked(client, summaryKeys);
-  await deleteKeysChunked(client, sellerStatKeys);
-  await deleteKeysChunked(client, legacyStateKeys);
-  await client.del(
-    STATE_INDEX_KEY, STATS_TOTAL_DAYS_KEY, STATS_KEY, RESULTS_KEY,
-    COMMISSION_SALES_KEY, COMMISSION_INSTALLMENTS_KEY, COMMISSION_PAYMENTS_KEY, COMMISSION_AUDIT_KEY,
-    PHONE_INDEX_KEY, PHONE_INDEX_READY_KEY,
-  );
-
-  // Cidades/estados.
-  if (snapshot.cities) {
-    for (const [ref, cityMap] of Object.entries(snapshot.cities || {})) {
-      const parsed = parseStateRef(ref);
-      if (!parsed) continue;
-      const tx = client.multi();
-      for (const [cityName, cityRaw] of Object.entries(cityMap || {})) {
-        const city = { ...defaultCity(), ...jsonParse(cityRaw, defaultCity()) };
-        tx.set(cityKey(parsed.seg, parsed.uf, cityName), JSON.stringify(city));
-        tx.hset(stateSummaryKey(parsed.seg, parsed.uf), cityName, JSON.stringify(publicCitySummary(city)));
-      }
-      tx.sadd(STATE_INDEX_KEY, ref);
-      await execMultiOrThrow(tx, "restauração das cidades");
-    }
-  } else {
-    for (const [ref, stateRaw] of Object.entries(snapshot.states || {})) {
-      const parsed = parseStateRef(ref);
-      const state = jsonParse(stateRaw, null);
-      if (!parsed || !state?.cidades) continue;
-      const tx = client.multi();
-      for (const [cityName, cityRaw] of Object.entries(state.cidades || {})) {
-        const city = { ...defaultCity(), ...(cityRaw || {}) };
-        tx.set(cityKey(parsed.seg, parsed.uf, cityName), JSON.stringify(city));
-        tx.hset(stateSummaryKey(parsed.seg, parsed.uf), cityName, JSON.stringify(publicCitySummary(city)));
-      }
-      tx.sadd(STATE_INDEX_KEY, ref);
-      await execMultiOrThrow(tx, "restauração dos estados legados");
-    }
-  }
-
-  const restoredMeta = jsonParse(snapshot.metaRaw, defaultMeta());
-  restoredMeta.storageLayout = "city-v1";
-  restoredMeta.statsLayout = STATS_LAYOUT;
-  restoredMeta.adminVersion = num(restoredMeta.adminVersion || 1) + 1;
-  restoredMeta.authVersions ||= {};
-  for (const key of Object.keys(restoredMeta.authVersions)) restoredMeta.authVersions[key] = num(restoredMeta.authVersions[key] || 1) + 1;
-  restoredMeta.updatedAt = now();
-  await client.set(META_KEY, JSON.stringify(restoredMeta));
-
-  const restoredStats = jsonParse(snapshot.statsRaw, defaultStats());
-  await replaceStatsShards(client, restoredMeta, restoredStats);
-  await client.set(STATS_KEY, JSON.stringify(restoredStats));
-  await client.set(RESULTS_KEY, snapshot.resultsRaw || JSON.stringify(defaultResults()));
-
-  if (snapshot.commissions) {
-    const txc = client.multi();
-    for (const [id, rawSale] of Object.entries(snapshot.commissions.sales || {})) txc.hset(COMMISSION_SALES_KEY, id, rawSale);
-    for (const [id, rawInst] of Object.entries(snapshot.commissions.installments || {})) txc.hset(COMMISSION_INSTALLMENTS_KEY, id, rawInst);
-    for (const [id, rawPay] of Object.entries(snapshot.commissions.payments || {})) txc.hset(COMMISSION_PAYMENTS_KEY, id, rawPay);
-    for (const rawEvent of [...(snapshot.commissions.audit || [])].reverse()) txc.lpush(COMMISSION_AUDIT_KEY, rawEvent);
-    // Mantém um histórico maior sem crescimento ilimitado.
-    txc.ltrim(COMMISSION_AUDIT_KEY, 0, 9999);
-    await execMultiOrThrow(txc, "restauração das comissões");
-  }
-
-  // Derivado das cidades; será reconstruído antes da próxima importação.
-  await client.del(PHONE_INDEX_KEY, PHONE_INDEX_READY_KEY);
-}
-
 async function restoreBackup(client, ts) {
   return withLock(client, RESTORE_LOCK_KEY, async () => {
-    const maintenanceToken = `restore:${randomUUID()}`;
-    const maintenanceOk = await client.set(MAINTENANCE_KEY, maintenanceToken, "PX", 10 * 60 * 1000, "NX");
+    const maintenanceToken = randomUUID();
+    const maintenanceOk = await client.set(MAINTENANCE_KEY, maintenanceToken, "PX", 5 * 60 * 1000, "NX");
     if (maintenanceOk !== "OK") {
       const e = new Error("já existe uma manutenção/restauração em andamento"); e.statusCode = 409; throw e;
     }
-
-    let renewing = false;
-    const heartbeat = setInterval(async () => {
-      if (renewing) return;
-      renewing = true;
-      try {
-        await client.eval(
-          "if redis.call('get',KEYS[1]) == ARGV[1] then return redis.call('pexpire',KEYS[1],ARGV[2]) else return 0 end",
-          1, MAINTENANCE_KEY, maintenanceToken, String(10 * 60 * 1000),
-        );
-      } catch {} finally { renewing = false; }
-    }, 60000);
-    heartbeat.unref?.();
-
     try {
-      const drained = await waitForWriteLocksToDrain(client, 20000);
+      // Bloqueia novas gravações e espera as poucas que já estavam em andamento
+      // concluírem antes de começar a substituir as chaves do banco.
+      const drained = await waitForWriteLocksToDrain(client, 15000);
       if (!drained) {
         const e = new Error("não foi possível iniciar a restauração porque ainda existem gravações em andamento"); e.statusCode = 409; throw e;
       }
 
       const raw = await client.get(BACKUP_PREFIX + ts);
-      if (!raw) { const e = new Error("esse backup não existe mais"); e.statusCode = 404; throw e; }
-      const snapshot = jsonParse(expand(raw), null);
-      validateBackupSnapshot(snapshot);
+    if (!raw) { const e = new Error("esse backup não existe mais"); e.statusCode = 404; throw e; }
+    const snapshot = jsonParse(expand(raw), null);
+    if (!snapshot || snapshot.version !== 4) throw new Error("backup inválido");
 
-      // Snapshot de emergência em memória. Se qualquer comando Redis falhar no meio
-      // da aplicação do backup, a função tenta retornar ao estado exato anterior.
-      const rollbackSnapshot = jsonParse(await buildBackupSnapshot(client), null);
-      validateBackupSnapshot(rollbackSnapshot);
+    const currentRefs = await client.smembers(STATE_INDEX_KEY);
+    for (const ref of currentRefs) {
+      const parsed = parseStateRef(ref);
+      if (!parsed) continue;
+      const names = await client.hkeys(stateSummaryKey(parsed.seg, parsed.uf));
+      if (names.length) await client.del(...names.map((name) => cityKey(parsed.seg, parsed.uf, name)));
+      await client.del(stateSummaryKey(parsed.seg, parsed.uf));
+      await client.del(legacyV4StateKey(parsed.seg, parsed.uf));
+    }
+    await client.del(STATE_INDEX_KEY);
 
-      try {
-        await applyBackupSnapshot(client, snapshot);
-      } catch (applyError) {
-        try {
-          await applyBackupSnapshot(client, rollbackSnapshot);
-        } catch (rollbackError) {
-          const e = new Error(`falha ao restaurar e ao reverter automaticamente: ${applyError?.message || applyError}; rollback: ${rollbackError?.message || rollbackError}`);
-          e.statusCode = 500;
-          throw e;
+    // Formato novo (por cidade).
+    if (snapshot.cities) {
+      for (const [ref, cityMap] of Object.entries(snapshot.cities || {})) {
+        const parsed = parseStateRef(ref);
+        if (!parsed) continue;
+        const tx = client.multi();
+        for (const [cityName, cityRaw] of Object.entries(cityMap || {})) {
+          const city = jsonParse(cityRaw, defaultCity());
+          tx.set(cityKey(parsed.seg, parsed.uf, cityName), JSON.stringify(city));
+          tx.hset(stateSummaryKey(parsed.seg, parsed.uf), cityName, JSON.stringify(publicCitySummary(city)));
         }
-        const e = new Error(`a restauração falhou e o banco anterior foi recuperado automaticamente: ${applyError?.message || applyError}`);
-        e.statusCode = 500;
-        throw e;
+        tx.sadd(STATE_INDEX_KEY, ref);
+        await execMultiOrThrow(tx, "restauração das cidades");
       }
+    } else if (snapshot.states) {
+      // Compatibilidade com um backup da primeira revisão v4 (um JSON por estado).
+      for (const [ref, stateRaw] of Object.entries(snapshot.states || {})) {
+        const parsed = parseStateRef(ref);
+        const state = jsonParse(stateRaw, null);
+        if (!parsed || !state?.cidades) continue;
+        const tx = client.multi();
+        for (const [cityName, city] of Object.entries(state.cidades || {})) {
+          tx.set(cityKey(parsed.seg, parsed.uf, cityName), JSON.stringify(city));
+          tx.hset(stateSummaryKey(parsed.seg, parsed.uf), cityName, JSON.stringify(publicCitySummary(city)));
+        }
+        tx.sadd(STATE_INDEX_KEY, ref);
+        await execMultiOrThrow(tx, "restauração dos estados legados");
+      }
+    }
+
+    const restoredMeta = jsonParse(snapshot.metaRaw, defaultMeta());
+    restoredMeta.storageLayout = "city-v1";
+    restoredMeta.statsLayout = STATS_LAYOUT;
+    restoredMeta.adminVersion = num(restoredMeta.adminVersion || 1) + 1;
+    restoredMeta.authVersions ||= {};
+    for (const key of Object.keys(restoredMeta.authVersions)) restoredMeta.authVersions[key] = num(restoredMeta.authVersions[key] || 1) + 1;
+    restoredMeta.updatedAt = now();
+    await client.set(META_KEY, JSON.stringify(restoredMeta));
+    const restoredStats = jsonParse(snapshot.statsRaw, defaultStats());
+    await replaceStatsShards(client, restoredMeta, restoredStats);
+    await client.set(STATS_KEY, JSON.stringify(restoredStats)); // cópia compatível, não usada em produção
+      await client.set(RESULTS_KEY, snapshot.resultsRaw || JSON.stringify(defaultResults()));
+      // Comissões ficam em estruturas separadas. Backups antigos simplesmente não
+      // possuem este bloco e, nesse caso, mantemos o módulo vazio.
+      await client.del(COMMISSION_SALES_KEY, COMMISSION_INSTALLMENTS_KEY, COMMISSION_PAYMENTS_KEY, COMMISSION_AUDIT_KEY);
+      if (snapshot.commissions) {
+        const txc = client.multi();
+        for (const [id, rawSale] of Object.entries(snapshot.commissions.sales || {})) txc.hset(COMMISSION_SALES_KEY, id, rawSale);
+        for (const [id, rawInst] of Object.entries(snapshot.commissions.installments || {})) txc.hset(COMMISSION_INSTALLMENTS_KEY, id, rawInst);
+        for (const [id, rawPay] of Object.entries(snapshot.commissions.payments || {})) txc.hset(COMMISSION_PAYMENTS_KEY, id, rawPay);
+        for (const rawEvent of [...(snapshot.commissions.audit || [])].reverse()) txc.lpush(COMMISSION_AUDIT_KEY, rawEvent);
+        txc.ltrim(COMMISSION_AUDIT_KEY, 0, 1999);
+        await execMultiOrThrow(txc, "restauração das comissões");
+      }
+      // O índice de telefone é derivado das cidades. Uma restauração muda o
+      // conjunto de contatos, então ele deve ser reconstruído na próxima importação.
+      await client.del(PHONE_INDEX_KEY, PHONE_INDEX_READY_KEY);
       return true;
     } finally {
-      clearInterval(heartbeat);
       try {
         await client.eval(
           "if redis.call('get',KEYS[1]) == ARGV[1] then return redis.call('del',KEYS[1]) else return 0 end",
@@ -1623,7 +1469,7 @@ async function restoreBackup(client, ts) {
         );
       } catch {}
     }
-  }, { ttl: 120000, retries: 160 });
+  }, { ttl: 30000, retries: 160 });
 }
 
 function sendError(res, err) {
@@ -1756,12 +1602,8 @@ export default async function handler(req, res) {
 
     if (action === "login_seller") {
       const ip = String(req.headers?.["x-forwarded-for"] || req.headers?.["x-real-ip"] || "unknown").split(",")[0].trim().slice(0, 120);
-      const ua = String(req.headers?.["user-agent"] || "unknown").slice(0, 300);
-      const ipHash = createHmac("sha256", SESSION_SECRET_SERVER).update(ip).digest("hex").slice(0, 20);
-      const deviceHash = createHmac("sha256", SESSION_SECRET_SERVER).update(ua).digest("hex").slice(0, 12);
-      // IP + navegador/dispositivo: um vendedor errando a senha no mesmo Wi-Fi
-      // não bloqueia automaticamente todos os outros vendedores do escritório.
-      const failKey = `${ROOT}:login:seller:${ipHash}:${deviceHash}`;
+      const ipHash = createHmac("sha256", SESSION_SECRET_SERVER).update(ip).digest("hex").slice(0, 24);
+      const failKey = `${ROOT}:login:seller:${ipHash}`;
       const fails = num(await client.get(failKey));
       if (fails >= ADMIN_LOGIN_MAX_FAILS) {
         res.status(429).json({ error: "Muitas tentativas. Aguarde alguns minutos e tente novamente." }); return;
@@ -1803,11 +1645,9 @@ export default async function handler(req, res) {
       }
 
       const ip = String(req.headers?.["x-forwarded-for"] || req.headers?.["x-real-ip"] || "unknown").split(",")[0].trim().slice(0, 120);
-      const ua = String(req.headers?.["user-agent"] || "unknown").slice(0, 300);
       const ipHash = createHmac("sha256", SESSION_SECRET_SERVER).update(ip).digest("hex").slice(0, 20);
-      const deviceHash = createHmac("sha256", SESSION_SECRET_SERVER).update(ua).digest("hex").slice(0, 12);
       const stateHash = createHmac("sha256", SESSION_SECRET_SERVER).update(k).digest("hex").slice(0, 12);
-      const failKey = `${ROOT}:login:state:${ipHash}:${deviceHash}:${stateHash}`;
+      const failKey = `${ROOT}:login:state:${ipHash}:${stateHash}`;
       const fails = num(await client.get(failKey));
       if (fails >= ADMIN_LOGIN_MAX_FAILS) {
         res.status(429).json({ error: "Muitas tentativas neste estado. Aguarde alguns minutos e tente novamente." }); return;
@@ -2074,68 +1914,37 @@ export default async function handler(req, res) {
       requireAdmin(meta, req);
       if (!cityName || !contactId) { res.status(400).json({ error: "cidade ou contato inválido" }); return; }
 
-      // Exclusão e índice global de telefone são alterados sob o MESMO lock de
-      // importação e, quando o contato existe, no MESMO MULTI do Redis. Isso
-      // evita o caso antigo em que o contato sumia mas o telefone continuava
-      // preso como duplicado.
       const output = await withLock(client, IMPORT_LOCK_KEY, async () => {
-        await ensureNotMaintenance(client);
         await ensurePhoneIndexUnlocked(client);
-        return withLock(client, cityLockKey(seg, uf, cityName), async () => {
-          await ensureNotMaintenance(client);
-          const currentCity = { ...defaultCity(), ...(await readCity(client, seg, uf, cityName)) };
+        let removed = false;
+        let removedContact = null;
+        const city = await writeCity(client, seg, uf, cityName, (currentCity) => {
           const contacts = Array.isArray(currentCity.contatos) ? currentCity.contatos : [];
-          const found = contacts.find((c) => String(c?.id || "") === contactId) || null;
+          const found = contacts.find((c) => String(c.id) === contactId);
+          if (!found) return currentCity; // retry idempotente
+          removed = true; removedContact = found;
+          return { ...currentCity, contatos: contacts.filter((c) => String(c.id) !== contactId) };
+        });
 
-          // Retry idempotente ou reparo de uma exclusão feita por versão antiga:
-          // se o contato já não existe, limpa qualquer entrada órfã do índice que
-          // ainda aponte para este mesmo contato.
-          if (!found) {
-            const indexRaw = await client.hgetall(PHONE_INDEX_KEY);
-            const stalePhones = Object.entries(indexRaw || {}).filter(([, raw]) => {
-              const idx = parsePhoneIndexValue(raw);
-              return idx && idx.seg === seg && idx.uf === uf && idx.city === cityName && String(idx.contactId || "") === contactId;
-            }).map(([phone]) => phone);
-            if (stalePhones.length) {
-              const txRepair = client.multi();
-              for (const phone of stalePhones) {
-                const replacement = await findPhoneElsewhere(client, phone, { seg, uf, city: cityName, contactId });
-                if (replacement) txRepair.hset(PHONE_INDEX_KEY, phone, phoneIndexValue(replacement.seg, replacement.uf, replacement.city, replacement.contactId));
-                else txRepair.hdel(PHONE_INDEX_KEY, phone);
-              }
-              await execMultiOrThrow(txRepair, "reparo do índice de telefones");
-            }
-            return { city: currentCity, removed: false };
-          }
-
-          const nextCity = { ...defaultCity(), ...currentCity, contatos: contacts.filter((c) => String(c?.id || "") !== contactId) };
-          const serialized = JSON.stringify(nextCity);
-          await ensureRoomForLargeValue(client, serialized);
-
-          const phone = normalizePhone(found.telefone);
-          let updatePhoneIndex = false;
-          let replacement = null;
+        if (removedContact) {
+          const phone = normalizePhone(removedContact.telefone);
           if (phone) {
             const indexed = parsePhoneIndexValue(await client.hget(PHONE_INDEX_KEY, phone));
-            updatePhoneIndex = !!(indexed && indexed.seg === seg && indexed.uf === uf && indexed.city === cityName && String(indexed.contactId || "") === contactId);
-            if (updatePhoneIndex) replacement = await findPhoneElsewhere(client, phone, { seg, uf, city: cityName, contactId });
+            const wasThis = indexed && indexed.seg === seg && indexed.uf === uf && indexed.city === cityName && String(indexed.contactId || "") === contactId;
+            if (wasThis) {
+              // Se já existia uma duplicata histórica antes da barreira, mantém o
+              // índice apontando para ela. Caso contrário, libera o telefone.
+              const replacement = await findPhoneElsewhere(client, phone, { seg, uf, city: cityName, contactId });
+              if (replacement) await client.hset(PHONE_INDEX_KEY, phone, phoneIndexValue(replacement.seg, replacement.uf, replacement.city, replacement.contactId));
+              else await client.hdel(PHONE_INDEX_KEY, phone);
+            }
           }
-
-          const tx = client.multi();
-          tx.set(cityKey(seg, uf, cityName), serialized);
-          tx.hset(stateSummaryKey(seg, uf), cityName, JSON.stringify(publicCitySummary(nextCity)));
-          tx.sadd(STATE_INDEX_KEY, stateRef(seg, uf));
-          if (phone && updatePhoneIndex) {
-            if (replacement) tx.hset(PHONE_INDEX_KEY, phone, phoneIndexValue(replacement.seg, replacement.uf, replacement.city, replacement.contactId));
-            else tx.hdel(PHONE_INDEX_KEY, phone);
-          }
-          await execMultiOrThrow(tx, "exclusão do contato e atualização do índice");
-          return { city: nextCity, removed: true };
-        }, { ttl: 30000, retries: 160 });
+        }
+        return { city, removed };
       }, { ttl: 30000, retries: 160 });
 
       // Histórico/estatística de produtividade NÃO é apagado quando o contato é removido.
-      // Se a primeira resposta se perder na rede, repetir continua sendo seguro.
+      // Se a primeira resposta se perder na rede, repetir a operação continua dando sucesso.
       res.status(200).json({ ok: true, removed: output.removed, removedId: contactId, citySummary: publicCitySummary(output.city) });
       return;
     }
@@ -2239,7 +2048,7 @@ export default async function handler(req, res) {
       const seller = sellerByName(meta, body.seller || "");
       const day = String(body.day || "");
       if (!seller) { res.status(404).json({ error: "vendedor não encontrado" }); return; }
-      if (!validISODate(day)) { res.status(400).json({ error: "data inválida" }); return; }
+      if (!/^\d{4}-\d{2}-\d{2}$/.test(day)) { res.status(400).json({ error: "data inválida" }); return; }
       const solicitacoes = clampInt(body.solicitacoes);
       const vendas = clampInt(body.vendas);
       const next = await writeResults(client, (r) => {
@@ -2256,7 +2065,6 @@ export default async function handler(req, res) {
     if (action === "save_commission_sale") {
       requireAdmin(meta, req);
       const incomingId = sanitizeCommissionText(body.id, 100);
-      const incomingVersion = clampInt(body.version);
       const seller = sellerByName(meta, body.seller || "");
       if (!seller) { res.status(404).json({ error: "vendedor não encontrado" }); return; }
       const clientName = sanitizeCommissionText(body.client, 500);
@@ -2294,11 +2102,6 @@ export default async function handler(req, res) {
         const id = incomingId || randomUUID();
         const currentBundle = incomingId ? await loadSaleBundle(client, incomingId) : { sale: null, installments: [], payments: [] };
         if (incomingId && !currentBundle.sale) { const e = new Error("venda não encontrada"); e.statusCode = 404; throw e; }
-        if (incomingId && incomingVersion !== num(currentBundle.sale?.version || 0)) {
-          const e = new Error("Esta venda foi alterada em outra sessão. Atualize os dados antes de salvar novamente.");
-          e.statusCode = 409;
-          throw e;
-        }
 
         if (!incomingId && !body.force) {
           const existingRaw = await client.hgetall(COMMISSION_SALES_KEY);

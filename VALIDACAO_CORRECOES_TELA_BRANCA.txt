@@ -1,0 +1,47 @@
+VALIDAÇÃO — CORREÇÃO DA TELA BRANCA E AUDITORIA
+
+1. CAUSA IDENTIFICADA
+- src/App.jsx continha um useCallback (carregarComissoes) depois de retornos condicionais de loading/login.
+- Isso violava a regra de ordem fixa de Hooks entre renders e podia derrubar o React.
+- Corrigido: carregarComissoes virou função normal, sem Hook condicional.
+
+2. VERIFICAÇÃO DE ORDEM DE HOOKS
+- Após a correção, não há useState/useEffect/useMemo/useCallback/useRef do componente principal depois do retorno condicional de loading/login.
+
+3. FORMULÁRIO DE COMISSÕES
+- O polling não reinicializa mais o formulário somente porque o array de vendedores ganhou nova referência.
+- A inicialização passa a acompanhar a venda realmente selecionada.
+
+4. PARCELAS / DATAS
+- Corrigido avanço de mês para dias 29, 30 e 31.
+- Datas impossíveis como 2026-02-31 são rejeitadas no backend.
+
+5. PAGAMENTOS
+- PaymentEditor mantém um requestId estável durante toda a tentativa.
+- Se o Redis gravar e a resposta HTTP se perder, clicar novamente no mesmo formulário não cria outro pagamento.
+
+6. REDIS / FINANCEIRO
+- Pipeline de vendas/parcelas/pagamentos/auditoria valida erros individuais.
+- Backup financeiro também valida cada retorno do pipeline.
+- Falha de leitura não é mais interpretada como lista vazia.
+
+7. CONCORRÊNCIA DE EDIÇÃO
+- Venda/comissão carrega sua version no formulário.
+- Backend rejeita salvar uma versão antiga se outra sessão já alterou a mesma venda.
+
+8. TELEFONE / EXCLUSÃO
+- Exclusão de contato e atualização do índice global de telefone agora entram no mesmo MULTI do Redis.
+- Evita telefone continuar bloqueado como duplicado após falha entre as etapas.
+
+9. TELA DE ERRO
+- Adicionado Error Boundary em src/main.jsx.
+- Se houver novo erro de render no futuro, o painel mostra a mensagem do erro em vez de ficar somente com tela escura.
+
+10. TESTES DE SINTAXE EXECUTADOS
+- node --check api/data.js: OK
+- TypeScript parser em App.jsx, Commissions.jsx e main.jsx com JSX preserve/noEmit: OK
+
+OBSERVAÇÃO SOBRE BUILD
+- O ambiente desta auditoria não possui as dependências npm instaladas por completo e não tem acesso à internet para reinstalá-las.
+- Portanto não é alegado que `vite build` foi concluído neste ambiente.
+- A sintaxe dos arquivos alterados foi validada pelos testes descritos acima.

@@ -1,0 +1,15 @@
+CORREÇÃO — REACT MINIFIED ERROR #310
+
+Causa identificada:
+- O hook useCallback usado por carregarComissoes estava declarado depois dos retornos condicionais de loading/login do componente App.
+- Na primeira renderização o componente retornava antes desse hook.
+- Após carregar/autenticar, o React executava um hook adicional.
+- Isso viola a regra de ordem estável dos Hooks e dispara o erro minificado React #310.
+
+Correção aplicada:
+- carregarComissoes/useCallback foi movido para a área de hooks/callbacks do App, antes de qualquer return condicional.
+- Nenhum hook do componente App permanece entre os returns de loading/login e o return principal.
+- api/data.js e vite.config.js passaram no node --check.
+
+Observação de validação:
+- O build Vite completo não foi concluído neste ambiente porque npm ci excedeu o tempo disponível. Não foi declarado como aprovado.
