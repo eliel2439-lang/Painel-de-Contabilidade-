@@ -161,7 +161,9 @@ function emptyData() {
 // A senha padrão de compatibilidade existe somente no servidor. Não colocamos
 // nenhuma senha real no bundle do navegador.
 function senhaDoEstado(data, seg, uf) {
-  return (data.senhasEstado && data.senhasEstado[chaveAtrib(seg, uf)]) || "";
+  // O navegador recebe somente um indicador de que existe senha configurada.
+  // A senha real e o hash nunca são enviados ao frontend.
+  return Boolean(data.senhasEstado && data.senhasEstado[chaveAtrib(seg, uf)]);
 }
 
 function fmtRelTime(ts) {
@@ -1214,10 +1216,11 @@ export default function PainelProspeccao() {
   };
 
   // Retorna uma Promise: o botão só mostra “Salvo ✓” depois da confirmação real do Redis.
-  const setResultadoProspeccao = async (vendedor, dia, solicitacoes, vendas) => {
+  const setResultadoProspeccao = async (vendedor, dia, retornos, solicitacoes, vendas) => {
     if (!painelGeralOk || !vendedor || !/^\d{4}-\d{2}-\d{2}$/.test(String(dia || ""))) throw new Error("dados inválidos");
     const res = await executarAcao("save_conversion", {
       seller: vendedor, day: dia,
+      retornos: Math.max(0, Math.floor(numOrZero(retornos))),
       solicitacoes: Math.max(0, Math.floor(numOrZero(solicitacoes))),
       vendas: Math.max(0, Math.floor(numOrZero(vendas))),
     }, adminToken);
@@ -1728,6 +1731,7 @@ export default function PainelProspeccao() {
                 uf={ufSelecionado}
                 segmentoAtual={segmentoAtual}
                 data={data}
+                resumoGlobal={resumoGlobal}
                 onVoltar={() => { setUfSelecionado(null); setFiltro(""); }}
                 vendedorAtual={data.atribuicoes[chaveAtrib(segmentoAtual, ufSelecionado)] || ""}
                 mensagem={data.mensagens?.[segmentoAtual] || (segmentoAtual === "Contabilidade" ? MENSAGEM_PADRAO_CONTABILIDADE : "")}
@@ -1948,11 +1952,100 @@ function SegmentosOverview({ data, resumoPorSegmento, onEscolher, novoSegmento, 
   );
 }
 
-function SellerEstadoView({ uf, segmentoAtual, data, onVoltar, vendedorAtual, mensagem, onCarregarContatos, onRegistrarEnvio, onAbrirComissoes }) {
+function SellerEstadoView({ uf, segmentoAtual, data, resumoGlobal, onVoltar, vendedorAtual, mensagem, onCarregarContatos, onRegistrarEnvio, onAbrirComissoes }) {
   const [cidadeAberta, setCidadeAberta] = useState(null);
   const [carregandoCidade, setCarregandoCidade] = useState(null);
   const cidadesObj = data.segmentos?.[segmentoAtual]?.[uf] || {};
   const cidades = Object.entries(cidadesObj).sort((a, b) => a[0].localeCompare(b[0], "pt-BR"));
+
+  const desempenho = useMemo(() => {
+    if (!vendedorAtual) return null;
+    const hoje = dataLocalISO(new Date());
+    const mes = hoje.slice(0, 7);
+    const info = resumoGlobal?.porVendedor?.[vendedorAtual] || { enviados: 0, porDia: {} };
+    const resultados = data?.resultadosProspeccao?.[vendedorAtual] || {};
+    const porDia = info.porDia || {};
+    const qtdHoje = numOrZero(porDia[hoje]);
+    const metaHoje = metaVendedorNoDia(data, vendedorAtual, hoje);
+    const faixa = faixaMeta(qtdHoje, metaHoje);
+
+    let mensagensMes = 0;
+    let retornosMes = 0;
+    let solicitacoesMes = 0;
+    let vendasMes = 0;
+    let diasTrabalhadosMes = 0;
+    let diasComMetaMes = 0;
+    let diasMetaBatidaMes = 0;
+    for (const [dia, qtdRaw] of Object.entries(porDia)) {
+      if (!dia.startsWith(mes)) continue;
+      const qtd = numOrZero(qtdRaw);
+      mensagensMes += qtd;
+      if (qtd > 0) diasTrabalhadosMes += 1;
+      const metaDia = metaVendedorNoDia(data, vendedorAtual, dia);
+      if (metaDia > 0) {
+        diasComMetaMes += 1;
+        if (qtd >= metaDia) diasMetaBatidaMes += 1;
+      }
+    }
+    let retornosTotal = 0;
+    let solicitacoesTotal = 0;
+    let vendasTotal = 0;
+    for (const [dia, row] of Object.entries(resultados)) {
+      const retornos = Math.max(0, numOrZero(row?.retornos));
+      const solicitacoes = Math.max(0, numOrZero(row?.solicitacoes));
+      const vendas = Math.max(0, numOrZero(row?.vendas));
+      retornosTotal += retornos;
+      solicitacoesTotal += solicitacoes;
+      vendasTotal += vendas;
+      if (dia.startsWith(mes)) {
+        retornosMes += retornos;
+        solicitacoesMes += solicitacoes;
+        vendasMes += vendas;
+      }
+    }
+
+    const rowHoje = resultados?.[hoje] || {};
+    const retornosHoje = Math.max(0, numOrZero(rowHoje.retornos));
+    const solicitacoesHoje = Math.max(0, numOrZero(rowHoje.solicitacoes));
+    const vendasHoje = Math.max(0, numOrZero(rowHoje.vendas));
+    const taxaRetornoHoje = qtdHoje > 0 ? (retornosHoje / qtdHoje) * 100 : 0;
+    const taxaRetornoMes = mensagensMes > 0 ? (retornosMes / mensagensMes) * 100 : 0;
+    const totalMensagens = Math.max(0, numOrZero(info.enviados));
+    const taxaRetornoTotal = totalMensagens > 0 ? (retornosTotal / totalMensagens) * 100 : 0;
+    const mediaDiariaMes = diasTrabalhadosMes > 0 ? mensagensMes / diasTrabalhadosMes : 0;
+    const pctDiasMeta = diasComMetaMes > 0 ? (diasMetaBatidaMes / diasComMetaMes) * 100 : null;
+
+    const ultimos5 = [];
+    for (let i = 0; i < 5; i++) {
+      const d = new Date();
+      d.setHours(12, 0, 0, 0);
+      d.setDate(d.getDate() - i);
+      const dia = dataLocalISO(d);
+      const qtd = numOrZero(porDia[dia]);
+      const meta = metaVendedorNoDia(data, vendedorAtual, dia);
+      const r = resultados?.[dia] || {};
+      const retornos = Math.max(0, numOrZero(r.retornos));
+      ultimos5.push({
+        dia,
+        qtd,
+        meta,
+        retornos,
+        faixa: faixaMeta(qtd, meta),
+        label: i === 0 ? "Hoje" : d.toLocaleDateString("pt-BR", { weekday: "short", day: "2-digit", month: "2-digit" }).replace(".", ""),
+      });
+    }
+
+    return {
+      hoje, qtdHoje, metaHoje, faixa,
+      mensagensMes, totalMensagens, mediaDiariaMes,
+      retornosHoje, retornosMes, retornosTotal,
+      solicitacoesHoje, solicitacoesMes, solicitacoesTotal,
+      vendasHoje, vendasMes, vendasTotal,
+      taxaRetornoHoje, taxaRetornoMes, taxaRetornoTotal,
+      diasTrabalhadosMes, diasComMetaMes, diasMetaBatidaMes, pctDiasMeta,
+      ultimos5,
+    };
+  }, [vendedorAtual, data, resumoGlobal]);
 
   const abrirCidade = async (nome) => {
     setCarregandoCidade(nome);
@@ -1966,17 +2059,138 @@ function SellerEstadoView({ uf, segmentoAtual, data, onVoltar, vendedorAtual, me
   const cidadeAtual = cidadeAberta ? data.segmentos?.[segmentoAtual]?.[uf]?.[cidadeAberta] : null;
   return (
     <div>
-      <div className="flex items-center justify-between gap-3 mb-5 flex-wrap">
+      <div className="flex items-center justify-between gap-3 mb-4 flex-wrap">
         <div>
           <button onClick={onVoltar} className="text-sm text-slate-500 hover:text-slate-200 flex items-center gap-1 mb-2"><ChevronLeft size={14}/> estados</button>
           <h2 className="text-xl font-semibold text-slate-50">{STATES_GEO.states[uf]?.name || uf} <span className="text-slate-500 text-sm font-normal">· {segmentoAtual}</span></h2>
-          <div className="text-xs text-slate-500 mt-1">Acesso do vendedor: <span className="text-[#e0a458] font-semibold">{vendedorAtual}</span></div>
+          <div className="text-xs text-slate-500 mt-1">Painel de <span className="text-[#e0a458] font-semibold">{vendedorAtual}</span> · dados individuais</div>
         </div>
         <div className="flex items-center gap-2">
           <button onClick={onAbrirComissoes} className="text-xs font-semibold px-3 py-2 rounded-lg flex items-center gap-1.5 text-[#e0a458]" style={{ background: "#191d25", border: "1px solid #5f4b2b" }}><BadgeDollarSign size={13}/> Minhas comissões</button>
-          <div className="text-xs text-slate-500 px-3 py-2 rounded-lg" style={{ background: "#191d25", border: "1px solid #2c3444" }}>Somente envio de mensagens</div>
         </div>
       </div>
+
+      {desempenho && (
+        <div className="mb-5 rounded-2xl p-3 sm:p-4" style={{ background: "#191d25", border: "1px solid #2c3444" }}>
+          <div className="flex items-start justify-between gap-3 mb-3">
+            <div>
+              <div className="text-[10px] uppercase tracking-[0.16em] text-slate-500">Meu desempenho</div>
+              <div className="text-sm text-slate-300 mt-1">{STATES_GEO.states[uf]?.name || uf} · atualizado conforme os envios registrados</div>
+            </div>
+            <div className="text-right">
+              <div className="text-[9px] uppercase tracking-wider text-slate-600">Meta diária</div>
+              <div className="mono text-lg font-bold text-[#e0a458]">{desempenho.metaHoje || "—"}</div>
+            </div>
+          </div>
+
+          <div className="rounded-2xl p-3 mb-3" style={{ background: "#11151b", border: `1px solid ${desempenho.faixa.status === "atingida" ? "#355f45" : "#333b49"}` }}>
+            <div className="flex items-end justify-between gap-3">
+              <div>
+                <div className="text-[10px] uppercase tracking-wider text-slate-500">Mensagens hoje</div>
+                <div className="flex items-baseline gap-1.5 mt-1">
+                  <span className="mono text-3xl font-bold" style={{ color: desempenho.faixa.status === "atingida" ? "#78b98b" : "#f8fafc" }}>{desempenho.qtdHoje}</span>
+                  <span className="mono text-sm text-slate-500">/ {desempenho.metaHoje || "sem meta"}</span>
+                </div>
+              </div>
+              <div className="text-right text-xs">
+                {desempenho.metaHoje > 0 ? (
+                  <>
+                    <div className="font-semibold" style={{ color: desempenho.faixa.status === "atingida" ? "#78b98b" : "#e0a458" }}>
+                      {desempenho.faixa.status === "atingida" ? "Meta batida ✓" : `Faltam ${desempenho.faixa.faltam}`}
+                    </div>
+                    <div className="text-slate-500 mt-0.5">{Math.round(desempenho.faixa.pct || 0)}% concluído</div>
+                  </>
+                ) : <div className="text-slate-500">Meta ainda não definida</div>}
+              </div>
+            </div>
+            {desempenho.metaHoje > 0 && (
+              <div className="h-2.5 rounded-full overflow-hidden mt-3" style={{ background: "#202630" }}>
+                <div className="h-full rounded-full transition-all" style={{ width: `${Math.min(100, desempenho.faixa.pct || 0)}%`, background: desempenho.faixa.status === "atingida" ? "#4f9d69" : "#e0a458" }} />
+              </div>
+            )}
+          </div>
+
+          <div className="grid grid-cols-2 lg:grid-cols-4 gap-2 mb-3">
+            <div className="rounded-xl p-3" style={{ background: "#14181f", border: "1px solid #2c3444" }}>
+              <div className="text-[9px] uppercase tracking-wider text-slate-500">Mensagens no mês</div>
+              <div className="mono text-xl font-bold text-slate-100 mt-1">{desempenho.mensagensMes.toLocaleString("pt-BR")}</div>
+              <div className="text-[10px] text-slate-600 mt-1">média {desempenho.mediaDiariaMes.toFixed(0)} por dia trabalhado</div>
+            </div>
+            <div className="rounded-xl p-3" style={{ background: "#14181f", border: "1px solid #2c3444" }}>
+              <div className="text-[9px] uppercase tracking-wider text-slate-500">Total já enviado</div>
+              <div className="mono text-xl font-bold text-slate-100 mt-1">{desempenho.totalMensagens.toLocaleString("pt-BR")}</div>
+              <div className="text-[10px] text-slate-600 mt-1">histórico do vendedor</div>
+            </div>
+            <div className="rounded-xl p-3" style={{ background: "#14181f", border: "1px solid #2c3444" }}>
+              <div className="text-[9px] uppercase tracking-wider text-slate-500">Retornos hoje</div>
+              <div className="mono text-xl font-bold text-[#7aa2c9] mt-1">{desempenho.retornosHoje}</div>
+              <div className="text-[10px] text-slate-600 mt-1">{desempenho.taxaRetornoHoje.toFixed(1)} a cada 100 mensagens</div>
+            </div>
+            <div className="rounded-xl p-3" style={{ background: "#16202a", border: "1px solid #31465b" }}>
+              <div className="text-[9px] uppercase tracking-wider text-[#91b7dc]">Retornos no mês</div>
+              <div className="mono text-xl font-bold text-[#91b7dc] mt-1">{desempenho.retornosMes}</div>
+              <div className="text-[10px] text-slate-400 mt-1">taxa {desempenho.taxaRetornoMes.toFixed(1)}% · {desempenho.taxaRetornoMes.toFixed(1)} / 100</div>
+            </div>
+          </div>
+
+          <div className="grid grid-cols-2 lg:grid-cols-4 gap-2 mb-3">
+            <div className="rounded-xl px-3 py-2.5" style={{ background: "#14181f", border: "1px solid #2c3444" }}>
+              <div className="text-[9px] uppercase text-slate-500">Solicitações no mês</div>
+              <div className="mono text-lg font-bold text-[#e0a458] mt-1">{desempenho.solicitacoesMes}</div>
+            </div>
+            <div className="rounded-xl px-3 py-2.5" style={{ background: "#14181f", border: "1px solid #2c3444" }}>
+              <div className="text-[9px] uppercase text-slate-500">Retornos no histórico</div>
+              <div className="mono text-lg font-bold text-[#91b7dc] mt-1">{desempenho.retornosTotal}</div>
+              <div className="text-[10px] text-slate-600">{desempenho.taxaRetornoTotal.toFixed(1)} a cada 100 mensagens</div>
+            </div>
+            <div className="rounded-xl px-3 py-2.5" style={{ background: "#14181f", border: "1px solid #2c3444" }}>
+              <div className="text-[9px] uppercase text-slate-500">Dias trabalhados</div>
+              <div className="mono text-lg font-bold text-slate-100 mt-1">{desempenho.diasTrabalhadosMes}</div>
+              <div className="text-[10px] text-slate-600">neste mês</div>
+            </div>
+            <div className="rounded-xl px-3 py-2.5" style={{ background: "#14181f", border: "1px solid #2c3444" }}>
+              <div className="text-[9px] uppercase text-slate-500">Dias com meta batida</div>
+              <div className="mono text-lg font-bold text-slate-100 mt-1">{desempenho.diasMetaBatidaMes}/{desempenho.diasComMetaMes || 0}</div>
+              <div className="text-[10px] text-slate-600">{desempenho.pctDiasMeta == null ? "sem histórico de meta" : `${desempenho.pctDiasMeta.toFixed(0)}% dos dias com meta`}</div>
+            </div>
+          </div>
+
+          <div className="rounded-xl p-3" style={{ background: "#14181f", border: "1px solid #2c3444" }}>
+            <div className="flex items-center justify-between gap-2 mb-2">
+              <div className="text-[10px] uppercase tracking-wider text-slate-500">Últimos 5 dias</div>
+              <div className="text-[9px] text-slate-600">mensagens · meta · retornos</div>
+            </div>
+            <div className="space-y-1.5">
+              {desempenho.ultimos5.map((d) => {
+                const statusColor = d.faixa.status === "atingida" ? "#78b98b" : d.meta > 0 ? "#e0a458" : "#657085";
+                return (
+                  <div key={d.dia} className="grid grid-cols-[74px_1fr_auto] items-center gap-2 rounded-lg px-2.5 py-2" style={{ background: "#10141a", border: "1px solid #232a36" }}>
+                    <div>
+                      <div className="text-[10px] font-semibold text-slate-300 capitalize">{d.label}</div>
+                      <div className="mono text-[9px] text-slate-600">{d.dia.slice(8,10)}/{d.dia.slice(5,7)}</div>
+                    </div>
+                    <div>
+                      <div className="flex items-center justify-between gap-2 text-[10px] mb-1">
+                        <span className="mono text-slate-300">{d.qtd} / {d.meta || "—"}</span>
+                        <span style={{ color: statusColor }}>{d.meta > 0 ? (d.faixa.status === "atingida" ? "meta batida" : `faltam ${d.faixa.faltam}`) : "sem meta"}</span>
+                      </div>
+                      <div className="h-1.5 rounded-full overflow-hidden" style={{ background: "#202630" }}>
+                        <div className="h-full rounded-full" style={{ width: `${d.meta > 0 ? Math.min(100, d.faixa.pct || 0) : 0}%`, background: statusColor }} />
+                      </div>
+                    </div>
+                    <div className="text-right">
+                      <div className="mono text-sm font-bold text-[#91b7dc]">{d.retornos}</div>
+                      <div className="text-[8px] text-slate-600">retornos</div>
+                    </div>
+                  </div>
+                );
+              })}
+            </div>
+          </div>
+
+          <div className="text-[10px] text-slate-600 mt-2.5 leading-relaxed">As mensagens são contabilizadas automaticamente ao abrir o WhatsApp. Retornos, solicitações e vendas são resultados separados; assim a taxa de retorno não é confundida com pedido de site.</div>
+        </div>
+      )}
 
       {cidades.length === 0 ? (
         <div className="text-center text-slate-500 py-16 rounded-2xl" style={{ background: "#191d25", border: "1px solid #232a36" }}>Nenhuma cidade com contatos disponível neste estado.</div>
@@ -3214,6 +3428,7 @@ function ConversaoProspeccaoSection({ data, resumoGlobal, onSalvar }) {
   const [fimCustom, setFimCustom] = useState(hoje);
   const [editorVendedor, setEditorVendedor] = useState(data.vendedores[0] || "");
   const [editorDia, setEditorDia] = useState(hoje);
+  const [editorRetornos, setEditorRetornos] = useState("0");
   const [editorSolicitacoes, setEditorSolicitacoes] = useState("0");
   const [editorVendas, setEditorVendas] = useState("0");
   const [editorSalvo, setEditorSalvo] = useState(false);
@@ -3267,40 +3482,50 @@ function ConversaoProspeccaoSection({ data, resumoGlobal, onSalvar }) {
     return vendedoresSelecionados.map((vendedor) => {
       const porDia = resumoGlobal.porVendedor?.[vendedor]?.porDia || {};
       const resultados = data.resultadosProspeccao?.[vendedor] || {};
-      let mensagens = 0, solicitacoes = 0, vendas = 0;
+      let mensagens = 0, retornos = 0, solicitacoes = 0, vendas = 0;
       for (const [dia, qtd] of Object.entries(porDia)) if (incluiDia(dia)) mensagens += numOrZero(qtd);
       for (const [dia, r] of Object.entries(resultados)) {
         if (!incluiDia(dia)) continue;
+        retornos += Math.max(0, numOrZero(r?.retornos));
         solicitacoes += Math.max(0, numOrZero(r?.solicitacoes));
         vendas += Math.max(0, numOrZero(r?.vendas));
       }
       return {
         vendedor,
         mensagens,
+        retornos,
         solicitacoes,
         vendas,
+        taxaRetorno: mensagens > 0 ? (retornos / mensagens) * 100 : null,
         taxaSolicitacao: mensagens > 0 ? (solicitacoes / mensagens) * 100 : null,
+        taxaSolicitacaoPorRetorno: retornos > 0 ? (solicitacoes / retornos) * 100 : null,
         taxaVenda: mensagens > 0 ? (vendas / mensagens) * 100 : null,
         taxaFechamento: solicitacoes > 0 ? (vendas / solicitacoes) * 100 : null,
+        mensagensPorRetorno: retornos > 0 ? mensagens / retornos : null,
         mensagensPorSolicitacao: solicitacoes > 0 ? mensagens / solicitacoes : null,
         mensagensPorVenda: vendas > 0 ? mensagens / vendas : null,
         solicitacoesPorVenda: vendas > 0 ? solicitacoes / vendas : null,
       };
-    }).sort((a, b) => b.mensagens - a.mensagens || b.solicitacoes - a.solicitacoes);
+    }).sort((a, b) => b.mensagens - a.mensagens || b.retornos - a.retornos || b.solicitacoes - a.solicitacoes);
   }, [vendedoresSelecionados, resumoGlobal.porVendedor, data.resultadosProspeccao, incluiDia]);
 
   const totais = useMemo(() => {
     const mensagens = linhas.reduce((s, x) => s + x.mensagens, 0);
+    const retornos = linhas.reduce((s, x) => s + x.retornos, 0);
     const solicitacoes = linhas.reduce((s, x) => s + x.solicitacoes, 0);
     const vendas = linhas.reduce((s, x) => s + x.vendas, 0);
     return {
-      mensagens, solicitacoes, vendas,
+      mensagens, retornos, solicitacoes, vendas,
+      taxaRetorno: mensagens > 0 ? (retornos / mensagens) * 100 : null,
       taxaSolicitacao: mensagens > 0 ? (solicitacoes / mensagens) * 100 : null,
+      taxaSolicitacaoPorRetorno: retornos > 0 ? (solicitacoes / retornos) * 100 : null,
       taxaVenda: mensagens > 0 ? (vendas / mensagens) * 100 : null,
       taxaFechamento: solicitacoes > 0 ? (vendas / solicitacoes) * 100 : null,
+      mensagensPorRetorno: retornos > 0 ? mensagens / retornos : null,
       mensagensPorSolicitacao: solicitacoes > 0 ? mensagens / solicitacoes : null,
       mensagensPorVenda: vendas > 0 ? mensagens / vendas : null,
       solicitacoesPorVenda: vendas > 0 ? solicitacoes / vendas : null,
+      retornosPor100: mensagens > 0 ? (retornos / mensagens) * 100 : 0,
       solicitacoesPor100: mensagens > 0 ? (solicitacoes / mensagens) * 100 : 0,
       vendasPor100: mensagens > 0 ? (vendas / mensagens) * 100 : 0,
     };
@@ -3311,6 +3536,7 @@ function ConversaoProspeccaoSection({ data, resumoGlobal, onSalvar }) {
 
   useEffect(() => {
     const atual = data.resultadosProspeccao?.[editorVendedor]?.[editorDia] || {};
+    setEditorRetornos(String(Math.max(0, Math.floor(numOrZero(atual.retornos)))));
     setEditorSolicitacoes(String(Math.max(0, Math.floor(numOrZero(atual.solicitacoes)))));
     setEditorVendas(String(Math.max(0, Math.floor(numOrZero(atual.vendas)))));
     setEditorSalvo(false);
@@ -3320,7 +3546,7 @@ function ConversaoProspeccaoSection({ data, resumoGlobal, onSalvar }) {
     if (!editorVendedor || !editorDia || editorSalvando) return;
     setEditorSalvando(true); setEditorErro(""); setEditorSalvo(false);
     try {
-      await onSalvar(editorVendedor, editorDia, editorSolicitacoes, editorVendas);
+      await onSalvar(editorVendedor, editorDia, editorRetornos, editorSolicitacoes, editorVendas);
       setEditorSalvo(true);
       setTimeout(() => setEditorSalvo(false), 1600);
     } catch (e) {
@@ -3337,14 +3563,15 @@ function ConversaoProspeccaoSection({ data, resumoGlobal, onSalvar }) {
       for (const dia of Object.keys(data.resultadosProspeccao?.[vendedor] || {})) if (incluiDia(dia)) dias.add(dia);
     }
     return [...dias].sort().slice(-31).map((dia) => {
-      let mensagens = 0, solicitacoes = 0, vendas = 0;
+      let mensagens = 0, retornos = 0, solicitacoes = 0, vendas = 0;
       for (const vendedor of vendedoresSelecionados) {
         mensagens += numOrZero(resumoGlobal.porVendedor?.[vendedor]?.porDia?.[dia]);
         const r = data.resultadosProspeccao?.[vendedor]?.[dia] || {};
+        retornos += Math.max(0, numOrZero(r.retornos));
         solicitacoes += Math.max(0, numOrZero(r.solicitacoes));
         vendas += Math.max(0, numOrZero(r.vendas));
       }
-      return { dia, label: dia.slice(5).split("-").reverse().join("/"), mensagens, solicitacoes, vendas };
+      return { dia, label: dia.slice(5).split("-").reverse().join("/"), mensagens, retornos, solicitacoes, vendas };
     });
   }, [vendedoresSelecionados, resumoGlobal.porVendedor, data.resultadosProspeccao, incluiDia]);
 
@@ -3364,14 +3591,15 @@ function ConversaoProspeccaoSection({ data, resumoGlobal, onSalvar }) {
     const cells = Array.from({ length: deslocamento }, () => null);
     for (let n = 1; n <= diasNoMes; n++) {
       const dia = `${ano}-${String(mes).padStart(2, "0")}-${String(n).padStart(2, "0")}`;
-      let mensagens = 0, solicitacoes = 0, vendas = 0;
+      let mensagens = 0, retornos = 0, solicitacoes = 0, vendas = 0;
       for (const vendedor of vendedores) {
         mensagens += numOrZero(resumoGlobal.porVendedor?.[vendedor]?.porDia?.[dia]);
         const r = data.resultadosProspeccao?.[vendedor]?.[dia] || {};
+        retornos += Math.max(0, numOrZero(r.retornos));
         solicitacoes += Math.max(0, numOrZero(r.solicitacoes));
         vendas += Math.max(0, numOrZero(r.vendas));
       }
-      cells.push({ dia, n, mensagens, solicitacoes, vendas, futuro: dia > hoje });
+      cells.push({ dia, n, mensagens, retornos, solicitacoes, vendas, futuro: dia > hoje });
     }
     return cells;
   }, [mesCalendarioConversao, vendedorCalendarioConversao, vendedoresDisponiveis, resumoGlobal.porVendedor, data.resultadosProspeccao, hoje]);
@@ -3383,7 +3611,7 @@ function ConversaoProspeccaoSection({ data, resumoGlobal, onSalvar }) {
           <div className="text-xs uppercase tracking-wider text-slate-400 flex items-center gap-1.5">
             <TrendingUp size={13} /> Conversão de prospecção
           </div>
-          <div className="text-[11px] text-slate-500 mt-1">Mensagens são contadas automaticamente. Você informa somente quantas pessoas solicitaram o site e quantas vendas realmente fecharam.</div>
+          <div className="text-[11px] text-slate-500 mt-1">Mensagens são contadas automaticamente. O administrador registra separadamente retornos, solicitações de site e vendas para não misturar as etapas do funil.</div>
         </div>
         <div className="flex items-center gap-2 flex-wrap">
           <select value={periodo} onChange={(e) => setPeriodo(e.target.value)} style={{ background: "#14181f", border: "1px solid #2c3444" }} className="px-2.5 py-2 rounded-lg text-xs text-slate-200">
@@ -3410,13 +3638,15 @@ function ConversaoProspeccaoSection({ data, resumoGlobal, onSalvar }) {
         </div>
       )}
 
-      <div className="grid grid-cols-2 md:grid-cols-3 xl:grid-cols-6 gap-2.5 mb-4">
+      <div className="grid grid-cols-2 md:grid-cols-4 xl:grid-cols-8 gap-2.5 mb-4">
         {[
           ["Mensagens", totais.mensagens.toLocaleString("pt-BR"), "#f8fafc"],
-          ["Solicitações de site", totais.solicitacoes.toLocaleString("pt-BR"), "#e0a458"],
-          ["Taxa de solicitação", fmtPct(totais.taxaSolicitacao), "#e0a458"],
-          ["Vendas fechadas", totais.vendas.toLocaleString("pt-BR"), "#4f9d69"],
-          ["Taxa de venda/mensagem", fmtPct(totais.taxaVenda), "#4f9d69"],
+          ["Retornos", totais.retornos.toLocaleString("pt-BR"), "#91b7dc"],
+          ["Taxa de retorno", fmtPct(totais.taxaRetorno), "#91b7dc"],
+          ["Solicitações", totais.solicitacoes.toLocaleString("pt-BR"), "#e0a458"],
+          ["Taxa solic./mensagem", fmtPct(totais.taxaSolicitacao), "#e0a458"],
+          ["Vendas", totais.vendas.toLocaleString("pt-BR"), "#4f9d69"],
+          ["Taxa venda/mensagem", fmtPct(totais.taxaVenda), "#4f9d69"],
           ["Solicitação → venda", fmtPct(totais.taxaFechamento), "#7aa2c9"],
         ].map(([label, value, cor]) => (
           <div key={label} className="rounded-xl px-3 py-3" style={{ background: "#14181f", border: "1px solid #2c3444" }}>
@@ -3431,24 +3661,24 @@ function ConversaoProspeccaoSection({ data, resumoGlobal, onSalvar }) {
           <div className="text-[10px] uppercase tracking-wider text-slate-500 mb-3">Leitura rápida · {intervalo.label}</div>
           <div className="grid grid-cols-2 gap-3">
             <div>
+              <div className="mono text-xl font-bold text-[#91b7dc]">{totais.retornosPor100.toFixed(1).replace(".0", "")}</div>
+              <div className="text-[11px] text-slate-500">retornos a cada 100 mensagens</div>
+            </div>
+            <div>
               <div className="mono text-xl font-bold text-[#e0a458]">{totais.solicitacoesPor100.toFixed(1).replace(".0", "")}</div>
               <div className="text-[11px] text-slate-500">solicitações a cada 100 mensagens</div>
             </div>
             <div>
-              <div className="mono text-xl font-bold text-[#4f9d69]">{totais.vendasPor100.toFixed(1).replace(".0", "")}</div>
-              <div className="text-[11px] text-slate-500">vendas a cada 100 mensagens</div>
-            </div>
-            <div>
-              <div className="mono text-base font-semibold text-slate-100">1 a cada {fmtRazao(totais.mensagensPorSolicitacao)}</div>
-              <div className="text-[10px] text-slate-600">mensagens para gerar 1 solicitação</div>
+              <div className="mono text-base font-semibold text-slate-100">1 a cada {fmtRazao(totais.mensagensPorRetorno)}</div>
+              <div className="text-[10px] text-slate-600">mensagens para gerar 1 retorno</div>
             </div>
             <div>
               <div className="mono text-base font-semibold text-slate-100">1 a cada {fmtRazao(totais.mensagensPorVenda)}</div>
               <div className="text-[10px] text-slate-600">mensagens para gerar 1 venda</div>
             </div>
             <div className="col-span-2">
-              <div className="mono text-base font-semibold text-slate-100">1 venda a cada {fmtRazao(totais.solicitacoesPorVenda)} solicitações</div>
-              <div className="text-[10px] text-slate-600 mt-0.5">relação entre quem pediu para ver o site e quem realmente fechou</div>
+              <div className="mono text-base font-semibold text-slate-100">{fmtPct(totais.taxaSolicitacaoPorRetorno)} dos retornos viraram solicitação</div>
+              <div className="text-[10px] text-slate-600 mt-0.5">funil: mensagem → retorno → solicitação → venda</div>
             </div>
           </div>
         </div>
@@ -3465,7 +3695,15 @@ function ConversaoProspeccaoSection({ data, resumoGlobal, onSalvar }) {
                 </select>
                 <input type="date" value={editorDia} max={hoje} onChange={(e) => setEditorDia(e.target.value)} style={{ background: "#10141a", border: "1px solid #2c3444" }} className="px-3 py-2.5 rounded-lg text-sm text-slate-200" />
               </div>
-              <div className="grid grid-cols-1 sm:grid-cols-2 gap-2 mb-2">
+              <div className="grid grid-cols-1 sm:grid-cols-3 gap-2 mb-2">
+                <div className="rounded-lg p-2.5" style={{ background: "#10141a", border: "1px solid #2c3444" }}>
+                  <div className="text-[10px] text-slate-500 mb-1">Retornos recebidos</div>
+                  <div className="flex items-center gap-2">
+                    <button onClick={() => setEditorRetornos(String(Math.max(0, Math.floor(numOrZero(editorRetornos)) - 1)))} className="w-8 h-8 rounded-lg text-slate-300" style={{ background: "#1c222c", border: "1px solid #2c3444" }}>−</button>
+                    <input type="number" min="0" step="1" value={editorRetornos} onChange={(e) => setEditorRetornos(e.target.value)} className="w-full bg-transparent text-center mono text-lg font-bold text-[#91b7dc]" />
+                    <button onClick={() => setEditorRetornos(String(Math.max(0, Math.floor(numOrZero(editorRetornos)) + 1)))} className="w-8 h-8 rounded-lg text-slate-300" style={{ background: "#1c222c", border: "1px solid #2c3444" }}>+</button>
+                  </div>
+                </div>
                 <div className="rounded-lg p-2.5" style={{ background: "#10141a", border: "1px solid #2c3444" }}>
                   <div className="text-[10px] text-slate-500 mb-1">Solicitações de site</div>
                   <div className="flex items-center gap-2">
@@ -3499,19 +3737,20 @@ function ConversaoProspeccaoSection({ data, resumoGlobal, onSalvar }) {
           <div className="text-sm text-slate-500 italic py-6 text-center">ainda não há vendedor com dados neste filtro</div>
         ) : (
           <div className="overflow-x-auto">
-            <table className="w-full text-sm min-w-[880px]">
+            <table className="w-full text-sm min-w-[1040px]">
               <thead><tr className="text-[10px] uppercase tracking-wider text-slate-500 text-left">
-                <th className="pb-2 pr-3">Vendedor</th><th className="pb-2 pr-3">Mensagens</th><th className="pb-2 pr-3">Solicitações</th><th className="pb-2 pr-3">Taxa solic.</th><th className="pb-2 pr-3">Vendas</th><th className="pb-2 pr-3">Taxa venda</th><th className="pb-2 pr-3">Solic. → venda</th><th className="pb-2">1 venda / mensagens</th>
+                <th className="pb-2 pr-3">Vendedor</th><th className="pb-2 pr-3">Mensagens</th><th className="pb-2 pr-3">Retornos</th><th className="pb-2 pr-3">Taxa retorno</th><th className="pb-2 pr-3">Solicitações</th><th className="pb-2 pr-3">Taxa solic.</th><th className="pb-2 pr-3">Vendas</th><th className="pb-2 pr-3">Taxa venda</th><th className="pb-2">1 venda / mensagens</th>
               </tr></thead>
               <tbody>{linhas.map((r) => (
                 <tr key={r.vendedor} style={{ borderTop: "1px solid #232a36" }}>
                   <td className="py-2.5 pr-3 text-slate-100 font-medium whitespace-nowrap">{r.vendedor}</td>
                   <td className="py-2.5 pr-3 mono text-slate-300">{r.mensagens}</td>
+                  <td className="py-2.5 pr-3 mono text-[#91b7dc] font-semibold">{r.retornos}</td>
+                  <td className="py-2.5 pr-3 mono text-[#91b7dc]">{fmtPct(r.taxaRetorno)}</td>
                   <td className="py-2.5 pr-3 mono text-[#e0a458] font-semibold">{r.solicitacoes}</td>
                   <td className="py-2.5 pr-3 mono text-[#e0a458]">{fmtPct(r.taxaSolicitacao)}</td>
                   <td className="py-2.5 pr-3 mono text-[#4f9d69] font-semibold">{r.vendas}</td>
                   <td className="py-2.5 pr-3 mono text-[#4f9d69]">{fmtPct(r.taxaVenda)}</td>
-                  <td className="py-2.5 pr-3 mono text-[#7aa2c9]">{fmtPct(r.taxaFechamento)}</td>
                   <td className="py-2.5 mono text-slate-400">{r.mensagensPorVenda ? `1 / ${fmtRazao(r.mensagensPorVenda)}` : "—"}</td>
                 </tr>
               ))}</tbody>
@@ -3533,6 +3772,7 @@ function ConversaoProspeccaoSection({ data, resumoGlobal, onSalvar }) {
                 <YAxis tick={{ fill: "#5b6579", fontSize: 10 }} axisLine={false} tickLine={false} allowDecimals={false} width={34} />
                 <RTooltip content={<ChartTooltip />} />
                 <Line type="monotone" dataKey="mensagens" name="Mensagens" stroke="#7aa2c9" strokeWidth={2} dot={false} />
+                <Line type="monotone" dataKey="retornos" name="Retornos" stroke="#91b7dc" strokeWidth={2} dot={false} />
                 <Line type="monotone" dataKey="solicitacoes" name="Solicitações" stroke="#e0a458" strokeWidth={2} dot={false} />
                 <Line type="monotone" dataKey="vendas" name="Vendas" stroke="#4f9d69" strokeWidth={2} dot={false} />
               </LineChart>
@@ -3558,12 +3798,13 @@ function ConversaoProspeccaoSection({ data, resumoGlobal, onSalvar }) {
               <div key={d.dia} className="min-h-[72px] rounded-lg p-1.5" style={{ background: d.futuro ? "#10141a" : d.vendas > 0 ? "#18261e" : d.solicitacoes > 0 ? "#2a2418" : "#10141a", border: `1px solid ${d.vendas > 0 ? "#355f45" : d.solicitacoes > 0 ? "#6e542b" : "#232a36"}`, opacity: d.futuro ? .45 : 1 }}>
                 <div className="text-[8px] text-slate-600">{d.n}</div>
                 <div className="mono text-[9px] text-slate-400 mt-1">M {d.mensagens}</div>
+                <div className="mono text-[9px] text-[#91b7dc]">R {d.retornos}</div>
                 <div className="mono text-[9px] text-[#e0a458]">S {d.solicitacoes}</div>
                 <div className="mono text-[9px] text-[#4f9d69]">V {d.vendas}</div>
               </div>
             ) : <div key={`vazio-conv-${i}`} />)}
           </div>
-          <div className="text-[9px] text-slate-600 mt-2">M = mensagens · S = solicitações de site · V = vendas fechadas</div>
+          <div className="text-[9px] text-slate-600 mt-2">M = mensagens · R = retornos · S = solicitações de site · V = vendas fechadas</div>
         </div>
       </div>
 
@@ -3648,22 +3889,25 @@ function PainelGeralView({ data, resumoPorSegmento, resumoGlobal, onIrParaSegmen
     });
   }, [resumoGlobal, data.vendedores]);
 
-  // --- Funil comercial oficial: mensagens → solicitações de site → vendas ---
+  // --- Funil comercial oficial: mensagens → retornos → solicitações de site → vendas ---
   // “Fechados” das cidades continua como campo operacional legado; venda oficial
   // para conversão vem exclusivamente do relatório de prospecção.
   const funil = useMemo(() => {
     const mensagens = Object.values(resumoGlobal.envioPorDia || {}).reduce((sum, n) => sum + numOrZero(n), 0);
+    let retornos = 0;
     let solicitacoes = 0;
     let vendas = 0;
     for (const porDia of Object.values(data.resultadosProspeccao || {})) {
       for (const r of Object.values(porDia || {})) {
+        retornos += numOrZero(r?.retornos);
         solicitacoes += numOrZero(r?.solicitacoes);
         vendas += numOrZero(r?.vendas);
       }
     }
     return [
       { nome: "Mensagens enviadas", valor: mensagens, pctDoAnterior: null },
-      { nome: "Solicitações de site", valor: solicitacoes, pctDoAnterior: mensagens > 0 ? (solicitacoes / mensagens) * 100 : 0 },
+      { nome: "Retornos recebidos", valor: retornos, pctDoAnterior: mensagens > 0 ? (retornos / mensagens) * 100 : 0 },
+      { nome: "Solicitações de site", valor: solicitacoes, pctDoAnterior: retornos > 0 ? (solicitacoes / retornos) * 100 : 0 },
       { nome: "Vendas fechadas", valor: vendas, pctDoAnterior: solicitacoes > 0 ? (vendas / solicitacoes) * 100 : 0 },
     ];
   }, [resumoGlobal.envioPorDia, data.resultadosProspeccao]);
@@ -3780,7 +4024,7 @@ function PainelGeralView({ data, resumoPorSegmento, resumoGlobal, onIrParaSegmen
   );
 
   const vendedorDoEstadoAdmin = ufAdmin ? data.atribuicoes[chaveAtrib(segAdmin, ufAdmin)] || "" : "";
-  const senhaAtualAdmin = ufAdmin && segAdmin ? senhaDoEstado(data, segAdmin, ufAdmin) : "";
+  const senhaConfiguradaAdmin = ufAdmin && segAdmin ? senhaDoEstado(data, segAdmin, ufAdmin) : false;
 
   const salvarSenhaAdmin = async () => {
     if (!segAdmin || !ufAdmin || !senhaAdminInput.trim() || salvandoSenha) return;
@@ -4002,7 +4246,7 @@ function PainelGeralView({ data, resumoPorSegmento, resumoGlobal, onIrParaSegmen
             )}
             {alertas.estadosSenhaPadrao.length > 0 && (
               <div style={{ background: "#14181f", border: "1px solid #2c3444" }} className="rounded-xl p-3">
-                <div className="text-xs font-semibold text-slate-200 mb-1.5">Estados ainda com a senha padrão do servidor</div>
+                <div className="text-xs font-semibold text-slate-200 mb-1.5">Estados ainda sem senha configurada</div>
                 <div className="flex flex-col gap-1 max-h-32 overflow-y-auto">
                   {alertas.estadosSenhaPadrao.map((e) => (
                     <div key={e.seg + e.uf} className="text-[11px] text-slate-400">{e.nome} <span className="text-slate-600">({e.seg})</span></div>
@@ -4255,7 +4499,9 @@ function PainelGeralView({ data, resumoPorSegmento, resumoGlobal, onIrParaSegmen
             <input
               value={senhaAdminInput}
               onChange={(e) => setSenhaAdminInput(e.target.value)}
-              placeholder={ufAdmin ? (senhaAtualAdmin ? `senha atual: ${senhaAtualAdmin}` : "senha padrão do servidor") : "nova senha"}
+              type="password"
+              autoComplete="new-password"
+              placeholder={ufAdmin ? (senhaConfiguradaAdmin ? "digite uma nova senha para substituir" : "defina uma senha (mín. 8 caracteres)") : "nova senha"}
               disabled={!ufAdmin}
               style={{ background: "#14181f", border: "1px solid #2c3444" }}
               className="flex-1 px-3 py-2.5 rounded-lg text-sm text-slate-200 placeholder-slate-600 disabled:opacity-40 min-w-0"
@@ -4292,8 +4538,8 @@ function PainelGeralView({ data, resumoPorSegmento, resumoGlobal, onIrParaSegmen
           </div>
         )}
         {ufAdmin && (
-          <div className="text-[11px] text-slate-500 mt-1">
-            senha atual: <span className="mono text-slate-300">{senhaAtualAdmin || "padrão do servidor"}</span>
+          <div className="text-[11px] mt-1" style={{ color: senhaConfiguradaAdmin ? "#4f9d69" : "#e0a458" }}>
+            {senhaConfiguradaAdmin ? "Senha configurada com segurança. Por proteção, a senha atual não pode ser visualizada; apenas substituída." : "Este estado ainda não possui senha. Defina uma senha antes de liberar o acesso."}
           </div>
         )}
       </div>

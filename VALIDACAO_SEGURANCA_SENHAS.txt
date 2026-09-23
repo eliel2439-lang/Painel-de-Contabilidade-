@@ -1,0 +1,29 @@
+VALIDAÇÃO DE SEGURANÇA — SENHAS
+
+Correções aplicadas:
+- Removidas credenciais fixas do código-fonte do backend.
+- ADMIN_PASSWORD, SELLER_PASSWORD e SESSION_SECRET agora vêm somente do ambiente do servidor.
+- O sistema recusa iniciar a autenticação se as variáveis de segurança estiverem ausentes/fracas.
+- Senhas por estado agora são armazenadas como hash + salt.
+- Senhas antigas de estado em texto puro são migradas automaticamente para hash + salt.
+- O frontend recebe apenas true/false indicando se um estado possui senha configurada.
+- O administrador não recebe nem visualiza a senha atual do estado; pode apenas substituí-la.
+- Removida a senha padrão automática para estados sem configuração.
+- Senhas de estado e do portal de comissões exigem no mínimo 8 caracteres.
+- Cookies administrativos e de vendedor continuam HttpOnly e SameSite=Strict.
+- Tokens de sessão não contêm senhas.
+
+Validações executadas:
+- Busca por credenciais antigas/hardcoded: nenhum resultado.
+- Busca por exposição de passwordHash/passwordSalt/segredos no src/index.html: nenhum resultado.
+- Sintaxe de api/data.js validada com node --check: OK.
+- Build Vite completo não executado porque a instalação de dependências excedeu o limite do ambiente.
+
+IMPORTANTE PARA PUBLICAR:
+Configure no servidor/hospedagem antes do deploy:
+- REDIS_URL
+- ADMIN_PASSWORD (mínimo 8 caracteres)
+- SELLER_PASSWORD (mínimo 8 caracteres)
+- SESSION_SECRET (mínimo 32 caracteres aleatórios)
+
+Como versões anteriores continham credenciais fixas no código, use NOVAS senhas ao publicar esta versão.

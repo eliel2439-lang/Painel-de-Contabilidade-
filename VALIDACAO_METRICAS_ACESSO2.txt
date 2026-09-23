@@ -1,17 +1,53 @@
-VALIDAÇÃO — MÉTRICAS DO ACESSO 2
+VALIDAÇÃO — METAS, MENSAGENS E RETORNOS DO ACESSO 2
 
-1. api/data.js passou em `node --check`.
-2. App.jsx e main.jsx passaram no parser JSX do TypeScript, sem erros de sintaxe.
-3. O endpoint de estado filtra resultados pelo sellerId atribuído ao segmento+UF.
-4. Acesso 2 recebe somente `solicitacoes`; `vendas` não são enviadas ao navegador do vendedor.
-5. O bootstrap público não apaga as solicitações já carregadas pelo endpoint protegido do estado.
-6. Cálculos adicionados:
-   - mensagens hoje / meta;
-   - mensagens últimos 7 dias;
-   - mensagens no mês;
-   - solicitações hoje;
-   - solicitações últimos 7 dias;
-   - solicitações no mês;
-   - taxa de solicitação hoje, semana e mês;
-   - solicitações a cada 100 mensagens (mesmo valor numérico da taxa percentual mensal).
-7. A instalação completa das dependências/build Vite não foi concluída neste ambiente; a validação sintática foi feita diretamente nos arquivos-fonte.
+ALTERAÇÃO IMPLEMENTADA
+1. O vendedor, depois de entrar no estado atribuído a ele, passa a ver um painel individual “Meu desempenho”.
+2. O painel foi organizado para funcionar bem no celular e também no computador.
+3. Indicadores exibidos ao vendedor:
+   - mensagens enviadas hoje;
+   - meta diária atual;
+   - percentual da meta concluído;
+   - quantas mensagens faltam para bater a meta;
+   - mensagens enviadas no mês;
+   - média diária no mês;
+   - total histórico de mensagens enviadas;
+   - retornos recebidos hoje;
+   - retornos recebidos no mês;
+   - total histórico de retornos;
+   - taxa de retorno de hoje;
+   - taxa de retorno mensal;
+   - taxa histórica de retorno;
+   - leitura “X retornos a cada 100 mensagens”;
+   - solicitações de site no mês;
+   - dias trabalhados no mês;
+   - dias em que a meta foi atingida;
+   - últimos 5 dias com mensagens, meta, falta/atingimento e retornos.
+
+RETORNOS SEPARADOS DE SOLICITAÇÕES
+4. Foi criado o campo “Retornos recebidos” no módulo administrativo de Conversão de Prospecção.
+5. Retorno não é mais confundido com solicitação de site.
+6. O funil passa a ser:
+   Mensagens -> Retornos -> Solicitações de site -> Vendas.
+7. O administrador consegue registrar, por vendedor e por dia:
+   - retornos;
+   - solicitações;
+   - vendas.
+
+PRIVACIDADE / VENDEDOR + ESTADO
+8. O endpoint protegido do estado identifica o sellerId atribuído ao segmento+UF.
+9. No Acesso 2, as estatísticas e os resultados enviados ao navegador ficam filtrados para o vendedor atribuído àquele estado.
+10. O Acesso 2 não recebe os resultados de outros vendedores.
+11. O vendedor recebe somente retornos e solicitações dos próprios resultados; vendas continuam restritas na resposta do estado.
+
+ATUALIZAÇÃO DOS DADOS
+12. As mensagens continuam sendo contabilizadas automaticamente ao tocar em “Abrir WhatsApp”.
+13. O painel protegido do estado é atualizado periodicamente e também após os envios, preservando os contadores do vendedor.
+14. Metas continuam usando o histórico por data, portanto uma alteração de meta não precisa apagar o histórico anterior.
+
+VALIDAÇÃO TÉCNICA
+15. api/data.js passou em `node --check`.
+16. App.jsx e main.jsx passaram no parser JSX do TypeScript sem erros de sintaxe.
+17. A instalação completa das dependências para executar o build Vite não foi concluída neste ambiente; por isso a validação final foi sintática e estrutural diretamente nos arquivos-fonte.
+
+OBSERVAÇÃO IMPORTANTE
+18. O WhatsApp não informa automaticamente ao painel quando o cliente respondeu. Por isso, o número de “retornos” é um dado registrado no módulo administrativo de Conversão de Prospecção. As mensagens enviadas, por outro lado, continuam sendo contadas automaticamente pelo próprio painel.
