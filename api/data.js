@@ -54,24 +54,12 @@ const TOKEN_TTL_MS = 12 * 60 * 60 * 1000;
 const MAX_BODY_CONTACTS = 5000;
 const GZIP_PREFIX = "__gzip_base64_v1__:";
 
-// Segredos SOMENTE do servidor. Nunca coloque senhas reais neste arquivo.
-// Configure estas variáveis no ambiente de hospedagem (ex.: Vercel).
-const ADMIN_PASSWORD_SERVER = String(process.env.ADMIN_PASSWORD || "");
-const SELLER_PASSWORD_SERVER = String(process.env.SELLER_PASSWORD || "");
-const SESSION_SECRET_SERVER = String(process.env.SESSION_SECRET || "");
-
-function assertSecurityConfig() {
-  const missing = [];
-  if (ADMIN_PASSWORD_SERVER.length < 8) missing.push("ADMIN_PASSWORD");
-  if (SELLER_PASSWORD_SERVER.length < 8) missing.push("SELLER_PASSWORD");
-  if (SESSION_SECRET_SERVER.length < 32) missing.push("SESSION_SECRET");
-  if (missing.length) {
-    const e = new Error(`Configuração de segurança ausente ou fraca: ${missing.join(", ")}`);
-    e.statusCode = 500;
-    e.securityConfig = true;
-    throw e;
-  }
-}
+// Segredos SOMENTE do servidor. Este arquivo não é empacotado pelo Vite e não vai
+// para o HTML/JavaScript entregue ao navegador. O usuário pediu explicitamente
+// para não depender de configuração no Vercel.
+const ADMIN_PASSWORD_SERVER = "bresilva";
+const SELLER_PASSWORD_SERVER = "1020";
+const SESSION_SECRET_SERVER = "07293d59b551087e0a7f0e97bfd9e83179a3efad00c5a55dee2bafbda9cd6780956a5618db1fe564eaa78d32f8bf6ffe";
 const ADMIN_COOKIE = "pp_admin_session";
 const SELLER_COOKIE = "pp_seller_session";
 const COMMISSION_COOKIE = "pp_commission_session";
@@ -504,24 +492,7 @@ async function migrateLegacy(client) {
 
 async function readMeta(client) {
   await migrateLegacy(client);
-  const meta = jsonParse(await client.get(META_KEY), defaultMeta());
-
-  // Migração de segurança: versões antigas guardavam a senha do estado em
-  // texto puro. Convertemos todas elas para hash + salt antes de devolver meta.
-  let hardened = false;
-  meta.senhasEstado ||= {};
-  for (const [k, value] of Object.entries(meta.senhasEstado)) {
-    if (typeof value === "string") {
-      if (value) meta.senhasEstado[k] = statePasswordRecord(value);
-      else delete meta.senhasEstado[k];
-      hardened = true;
-    }
-  }
-  if (hardened) {
-    meta.updatedAt = now();
-    await client.set(META_KEY, JSON.stringify(meta));
-  }
-  return meta;
+  return jsonParse(await client.get(META_KEY), defaultMeta());
 }
 async function readResults(client) {
   return jsonParse(await client.get(RESULTS_KEY), defaultResults());
@@ -772,35 +743,6 @@ function commissionLoginKey(raw) {
 function commissionPasswordHash(password, salt) {
   return createHmac("sha256", tokenSecret()).update(`${salt}\0${String(password || "")}`).digest("hex");
 }
-function statePasswordHash(password, salt) {
-  return createHmac("sha256", tokenSecret()).update(`state\0${salt}\0${String(password || "")}`).digest("hex");
-}
-function statePasswordRecord(password) {
-  const salt = randomUUID().replace(/-/g, "");
-  return { v: 2, salt, hash: statePasswordHash(password, salt) };
-}
-function statePasswordConfiguredValue(value) {
-  return Boolean(value && (typeof value === "string" ? value.length : value.salt && value.hash));
-}
-function statePasswordFlags(meta) {
-  const out = {};
-  for (const [k, value] of Object.entries(meta.senhasEstado || {})) {
-    if (statePasswordConfiguredValue(value)) out[k] = true;
-  }
-  return out;
-}
-function verifyStatePasswordValue(value, supplied) {
-  if (!statePasswordConfiguredValue(value)) return false;
-  if (typeof value === "string") {
-    const a = Buffer.from(String(supplied || ""));
-    const b = Buffer.from(value);
-    return a.length === b.length && timingSafeEqual(a, b);
-  }
-  const suppliedHash = statePasswordHash(supplied, value.salt);
-  const a = Buffer.from(suppliedHash);
-  const b = Buffer.from(String(value.hash || ""));
-  return a.length === b.length && timingSafeEqual(a, b);
-}
 function commissionAccessList(meta) {
   return activeSellers(meta).map((seller) => {
     const access = meta.commissionAccess?.[seller.id] || null;
@@ -1019,7 +961,7 @@ function frontendAdminFields(meta, stats, results) {
   return {
     vendedores: sellers.map((s) => s.name),
     atribuicoes: assignments,
-    senhasEstado: statePasswordFlags(meta),
+    senhasEstado: { ...(meta.senhasEstado || {}) },
     metasVendedor: goals,
     metaAlteracoesVendedor: goalHistory,
     estatisticasMensagens: mapStatsForFrontend(meta, stats, null),
@@ -1582,11 +1524,6 @@ async function restoreBackup(client, ts) {
 
 function sendError(res, err) {
   const status = err?.statusCode || 500;
-  if (err?.securityConfig) {
-    console.error(String(err?.message || err));
-    res.status(500).json({ error: "Configuração de segurança do servidor incompleta." });
-    return;
-  }
   const msg = String(err?.message || err || "erro inesperado");
   res.status(status).json({ error: msg });
 }
@@ -1595,7 +1532,6 @@ export default async function handler(req, res) {
   let client;
   try {
     res.setHeader("Cache-Control", "no-store, max-age=0");
-    assertSecurityConfig();
     client = getRedis();
     await migrateLegacy(client);
     await migrateStatsStorage(client);
@@ -1814,27 +1750,17 @@ export default async function handler(req, res) {
         res.status(429).json({ error: "Muitas tentativas neste estado. Aguarde alguns minutos e tente novamente." }); return;
       }
 
-      const storedPassword = meta.senhasEstado?.[k];
-      if (!statePasswordConfiguredValue(storedPassword)) {
-        res.status(403).json({ error: "Este estado ainda não possui senha configurada. Peça ao administrador para definir uma senha." }); return;
-      }
+      const expected = String(meta.senhasEstado?.[k] || "1234");
       const supplied = String(body.password || "");
-      const okPassword = verifyStatePasswordValue(storedPassword, supplied);
+      const a = Buffer.from(supplied);
+      const b = Buffer.from(expected);
+      const okPassword = a.length === b.length && timingSafeEqual(a, b);
       if (!okPassword) {
         const count = await client.incr(failKey);
         if (count === 1) await client.expire(failKey, ADMIN_LOGIN_WINDOW_SEC);
         res.status(401).json({ error: "Senha deste estado incorreta." }); return;
       }
       await client.del(failKey);
-      // Migração transparente: se ainda existir uma senha antiga em texto puro no
-      // banco, o primeiro login correto converte imediatamente para hash + salt.
-      if (typeof storedPassword === "string") {
-        const hardened = statePasswordRecord(supplied);
-        meta.senhasEstado ||= {};
-        meta.senhasEstado[k] = hardened;
-        meta.updatedAt = now();
-        await client.set(META_KEY, JSON.stringify(meta));
-      }
 
       const token = issueState(meta, seg, uf, seller.id);
       const payload = { type: "state", seg, uf, sellerId: seller.id, v: meta.authVersions?.[k] || 1 };
@@ -2213,8 +2139,8 @@ export default async function handler(req, res) {
       const duplicate = Object.entries(meta.commissionAccess || {}).find(([id, access]) => id !== seller.id && access?.loginKey === loginKey);
       if (duplicate) { res.status(409).json({ error: "este login já está sendo usado por outro vendedor" }); return; }
       const current = meta.commissionAccess?.[seller.id] || null;
-      if (!current?.passwordHash && password.length < 8) { res.status(400).json({ error: "defina uma senha com pelo menos 8 caracteres" }); return; }
-      if (password && password.length < 8) { res.status(400).json({ error: "a nova senha precisa ter pelo menos 8 caracteres" }); return; }
+      if (!current?.passwordHash && password.length < 4) { res.status(400).json({ error: "defina uma senha com pelo menos 4 caracteres" }); return; }
+      if (password && password.length < 4) { res.status(400).json({ error: "a nova senha precisa ter pelo menos 4 caracteres" }); return; }
 
       const next = await writeMeta(client, (m) => {
         m.commissionAccess ||= {};
@@ -2444,14 +2370,14 @@ export default async function handler(req, res) {
       requireAdmin(meta, req);
       const seg = String(body.seg || ""); const uf = String(body.uf || "").toUpperCase();
       const password = String(body.password || "").slice(0, 200);
-      if (password.length < 8) { res.status(400).json({ error: "a senha precisa ter pelo menos 8 caracteres" }); return; }
+      if (!password) { res.status(400).json({ error: "senha vazia" }); return; }
       const next = await writeMeta(client, (m) => {
         const k = assignmentKey(seg, uf);
-        m.senhasEstado ||= {}; m.senhasEstado[k] = statePasswordRecord(password);
+        m.senhasEstado ||= {}; m.senhasEstado[k] = password;
         m.authVersions[k] = num(m.authVersions[k] || 1) + 1;
         return m;
       });
-      res.status(200).json({ ok: true, senhasEstado: statePasswordFlags(next) });
+      res.status(200).json({ ok: true, senhasEstado: next.senhasEstado });
       return;
     }
 

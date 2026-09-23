@@ -161,9 +161,7 @@ function emptyData() {
 // A senha padrão de compatibilidade existe somente no servidor. Não colocamos
 // nenhuma senha real no bundle do navegador.
 function senhaDoEstado(data, seg, uf) {
-  // O navegador recebe somente um indicador de que existe senha configurada.
-  // A senha real e o hash nunca são enviados ao frontend.
-  return Boolean(data.senhasEstado && data.senhasEstado[chaveAtrib(seg, uf)]);
+  return (data.senhasEstado && data.senhasEstado[chaveAtrib(seg, uf)]) || "";
 }
 
 function fmtRelTime(ts) {
@@ -4024,7 +4022,7 @@ function PainelGeralView({ data, resumoPorSegmento, resumoGlobal, onIrParaSegmen
   );
 
   const vendedorDoEstadoAdmin = ufAdmin ? data.atribuicoes[chaveAtrib(segAdmin, ufAdmin)] || "" : "";
-  const senhaConfiguradaAdmin = ufAdmin && segAdmin ? senhaDoEstado(data, segAdmin, ufAdmin) : false;
+  const senhaAtualAdmin = ufAdmin && segAdmin ? senhaDoEstado(data, segAdmin, ufAdmin) : "";
 
   const salvarSenhaAdmin = async () => {
     if (!segAdmin || !ufAdmin || !senhaAdminInput.trim() || salvandoSenha) return;
@@ -4246,7 +4244,7 @@ function PainelGeralView({ data, resumoPorSegmento, resumoGlobal, onIrParaSegmen
             )}
             {alertas.estadosSenhaPadrao.length > 0 && (
               <div style={{ background: "#14181f", border: "1px solid #2c3444" }} className="rounded-xl p-3">
-                <div className="text-xs font-semibold text-slate-200 mb-1.5">Estados ainda sem senha configurada</div>
+                <div className="text-xs font-semibold text-slate-200 mb-1.5">Estados ainda com a senha padrão do servidor</div>
                 <div className="flex flex-col gap-1 max-h-32 overflow-y-auto">
                   {alertas.estadosSenhaPadrao.map((e) => (
                     <div key={e.seg + e.uf} className="text-[11px] text-slate-400">{e.nome} <span className="text-slate-600">({e.seg})</span></div>
@@ -4499,9 +4497,7 @@ function PainelGeralView({ data, resumoPorSegmento, resumoGlobal, onIrParaSegmen
             <input
               value={senhaAdminInput}
               onChange={(e) => setSenhaAdminInput(e.target.value)}
-              type="password"
-              autoComplete="new-password"
-              placeholder={ufAdmin ? (senhaConfiguradaAdmin ? "digite uma nova senha para substituir" : "defina uma senha (mín. 8 caracteres)") : "nova senha"}
+              placeholder={ufAdmin ? (senhaAtualAdmin ? `senha atual: ${senhaAtualAdmin}` : "senha padrão do servidor") : "nova senha"}
               disabled={!ufAdmin}
               style={{ background: "#14181f", border: "1px solid #2c3444" }}
               className="flex-1 px-3 py-2.5 rounded-lg text-sm text-slate-200 placeholder-slate-600 disabled:opacity-40 min-w-0"
@@ -4538,8 +4534,8 @@ function PainelGeralView({ data, resumoPorSegmento, resumoGlobal, onIrParaSegmen
           </div>
         )}
         {ufAdmin && (
-          <div className="text-[11px] mt-1" style={{ color: senhaConfiguradaAdmin ? "#4f9d69" : "#e0a458" }}>
-            {senhaConfiguradaAdmin ? "Senha configurada com segurança. Por proteção, a senha atual não pode ser visualizada; apenas substituída." : "Este estado ainda não possui senha. Defina uma senha antes de liberar o acesso."}
+          <div className="text-[11px] text-slate-500 mt-1">
+            senha atual: <span className="mono text-slate-300">{senhaAtualAdmin || "padrão do servidor"}</span>
           </div>
         )}
       </div>

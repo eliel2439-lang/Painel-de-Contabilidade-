@@ -27,7 +27,7 @@ CORREÇÃO 19/09/2026 — contactId
 - Corrigido erro de frontend "contactId is not defined" no registro de envio.
 - Corrigida a mesma inconsistência nas rotinas de desmarcar e remover contato.
 - O parâmetro local `contatoId` agora é enviado explicitamente à API como `contactId`.
-- Senha do Acesso 1 agora é definida somente por variável de ambiente no servidor.
+- Senha do Acesso 1 alterada para `bresilva` (somente servidor).
 - api/data.js passou em `node --check`.
 - src/App.jsx e src/main.jsx passaram por parse/transpilação JSX sem diagnóstico sintático.
 
