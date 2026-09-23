@@ -66,3 +66,11 @@ Publique no mesmo projeto e mantenha o Redis atual. Não é necessário criar va
 - Leitura financeira é feita sob o mesmo lock das gravações para evitar snapshot misturado.
 - Nova página **Minhas Comissões** no Acesso 2 após desbloquear o estado. A API identifica o vendedor pelo estado e devolve somente os dados financeiros desse vendedor.
 - Vendedor tem acesso somente de leitura às próprias vendas, parcelas, valores pagos, em aberto, calendário e próximo pagamento.
+Atualização 2026-09-22
+- Portal de comissões do vendedor deixado mais completo e visualmente mais claro.
+- Novos blocos: comparação mês atual vs mês passado, previsão de recebimentos 7/15/30/60/90 dias, calendário de vendas, calendário de recebimentos, relatório dos últimos 6 meses e lista detalhada de clientes/vendas.
+Atualização mobile 2026-09-22
+- Portal do vendedor otimizado para celular.
+- Prioridade no topo para: tenho a receber, comissão do mês, já recebi no mês e vendido no mês.
+- Seções recolhíveis para evitar página longa/confusa no celular: previsão, comparativo, calendários, clientes e últimos 6 meses.
+- Cards de clientes reorganizados em formato mobile.

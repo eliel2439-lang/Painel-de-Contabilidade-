@@ -1,0 +1,19 @@
+CORREÇÃO — FORMULÁRIO "NOVA VENDA"
+Data: 22/09/2026
+
+Problema identificado:
+- O formulário SaleForm reinicializava sempre que a prop `sellers` mudava de referência.
+- O painel executa atualização automática do bootstrap a cada 20 segundos.
+- Mesmo com os mesmos vendedores, a atualização podia entregar um novo array e disparar o useEffect.
+- Resultado: campos em preenchimento (cliente, telefone, venda, comissão, observações e parcelas) podiam voltar ao estado inicial.
+
+Correção aplicada:
+- O formulário agora é inicializado apenas ao abrir uma nova venda ou ao trocar para outra venda em edição (ID diferente).
+- Atualizações periódicas da lista de vendedores não reinicializam mais o rascunho.
+- Se o formulário abrir antes de haver vendedor disponível, o primeiro vendedor é preenchido posteriormente sem apagar os demais campos.
+- A lógica de salvamento, validação de parcelas, cálculo de comissão e backend foi preservada.
+
+Validações executadas:
+- src/Commissions.jsx: parse JSX OK via TypeScript parser.
+- src/App.jsx: parse JSX OK via TypeScript parser.
+- api/data.js: node --check OK.
