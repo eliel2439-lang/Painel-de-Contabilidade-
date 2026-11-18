@@ -16,7 +16,7 @@ const STATUS_ORDER = { em_andamento: 0, nao_iniciado: 1, concluido: 2 };
 
 const STORAGE_KEY = "prospeccao-v4";
 
-async function apiRequest(path, { method = "GET", token = "", body, timeoutMs = 20000 } = {}) {
+async function apiRequest(path, { method = "GET", token = "", body, timeoutMs = 20000, headers: extraHeaders = {} } = {}) {
   let response;
   const controller = new AbortController();
   const timeout = setTimeout(() => controller.abort(), Math.max(5000, timeoutMs));
@@ -28,6 +28,7 @@ async function apiRequest(path, { method = "GET", token = "", body, timeoutMs = 
       headers: {
         ...(body !== undefined ? { "Content-Type": "application/json" } : {}),
         ...(token ? { Authorization: `Bearer ${token}` } : {}),
+        ...extraHeaders,
       },
       ...(body !== undefined ? { body: JSON.stringify(body) } : {}),
     });
@@ -931,10 +932,17 @@ export default function PainelProspeccao() {
   // Busca de telefone é feita no servidor porque os contatos agora são carregados
   // sob demanda por cidade. Assim a busca global continua encontrando contatos
   // que ainda não foram abertos nesta sessão, sem baixar o banco inteiro.
+  // Acesso 2: a busca usa os tokens dos estados que o vendedor já abriu com a
+  // senha; o servidor valida cada um e procura só nesses estados.
+  const tokensBuscaVendedor = useMemo(
+    () => (sellerSession ? Object.values(stateTokens || {}).filter(Boolean) : []),
+    [sellerSession, stateTokens],
+  );
   useEffect(() => {
     const digitos = buscaGlobal.trim().replace(/\D/g, "");
     const seq = ++buscaContatoSeqRef.current;
-    if (!painelGeralOk || digitos.length < 4) {
+    const podeBuscarTelefone = painelGeralOk || (sellerSession && tokensBuscaVendedor.length > 0);
+    if (!podeBuscarTelefone || digitos.length < 4) {
       setContatosBuscaServidor([]);
       setBuscaContatoCarregando(false);
       return;
@@ -942,7 +950,9 @@ export default function PainelProspeccao() {
     setBuscaContatoCarregando(true);
     const timer = setTimeout(async () => {
       try {
-        const res = await apiRequest(`/api/data?mode=search_contacts&q=${encodeURIComponent(digitos)}&seg=${encodeURIComponent(segmentoAtual)}`, { token: adminToken });
+        const res = painelGeralOk
+          ? await apiRequest(`/api/data?mode=search_contacts&q=${encodeURIComponent(digitos)}&seg=${encodeURIComponent(segmentoAtual)}`, { token: adminToken })
+          : await apiRequest(`/api/data?mode=search_contacts&q=${encodeURIComponent(digitos)}`, { headers: { "X-State-Tokens": tokensBuscaVendedor.join(",") } });
         if (seq === buscaContatoSeqRef.current) setContatosBuscaServidor(res.items || []);
       } catch {
         if (seq === buscaContatoSeqRef.current) setContatosBuscaServidor([]);
@@ -951,7 +961,7 @@ export default function PainelProspeccao() {
       }
     }, 280);
     return () => clearTimeout(timer);
-  }, [buscaGlobal, painelGeralOk, segmentoAtual, adminToken]);
+  }, [buscaGlobal, painelGeralOk, sellerSession, tokensBuscaVendedor, segmentoAtual, adminToken]);
 
   const resultadosBusca = useMemo(() => {
     if (!buscaGlobal.trim()) return { tipo: "cidade", itens: [] };
@@ -960,7 +970,7 @@ export default function PainelProspeccao() {
 
     // Telefones são pesquisados no servidor (somente administrador), porque os
     // contatos completos não ficam mais carregados no navegador o tempo todo.
-    if (digitos.length >= 4 && painelGeralOk) {
+    if (digitos.length >= 4 && (painelGeralOk || sellerSession)) {
       return { tipo: "contato", itens: contatosBuscaServidor };
     }
 
@@ -975,7 +985,7 @@ export default function PainelProspeccao() {
       }
     }
     return { tipo: "cidade", itens: out };
-  }, [buscaGlobal, data, segmentoAtual, painelGeralOk, contatosBuscaServidor]);
+  }, [buscaGlobal, data, segmentoAtual, painelGeralOk, sellerSession, contatosBuscaServidor]);
 
   const applyAdminFields = useCallback((admin) => {
     if (!admin) return;
@@ -1168,7 +1178,7 @@ export default function PainelProspeccao() {
     return "#4a5468";
   };
 
-  const irParaCidade = (uf, nome) => { setUfSelecionado(uf); setFiltro(nome); setBuscaAberta(false); setBuscaGlobal(""); };
+  const irParaCidade = (uf, nome, seg) => { if (seg) setSegmentoAtual(seg); setTela("mapa"); setUfSelecionado(uf); setFiltro(nome); setBuscaAberta(false); setBuscaGlobal(""); };
 
   const copiarDadosBusca = async (contato) => {
     const partes = [contato.nome, contato.telefone, contato.endereco].filter(Boolean);
@@ -1441,14 +1451,14 @@ export default function PainelProspeccao() {
                 Acesso 2
               </div>
             )}
-            {painelGeralOk && <div className="relative">
+            {(painelGeralOk || sellerSession) && <div className="relative">
               <div className="flex items-center gap-2 px-3 py-1.5 rounded-full" style={{ background: "#1c222c", border: "1px solid #2c3444" }}>
                 <Search size={13} className="text-slate-500" />
                 <input
                   value={buscaGlobal}
                   onChange={(e) => { setBuscaGlobal(e.target.value); setBuscaAberta(true); }}
                   onFocus={() => setBuscaAberta(true)}
-                  placeholder={painelGeralOk ? "cidade ou telefone da empresa…" : "buscar cidade…"}
+                  placeholder="cidade ou telefone da empresa…"
                   className="bg-transparent text-sm text-slate-100 placeholder-slate-600 outline-none w-32 sm:w-48"
                 />
                 {buscaGlobal && (
@@ -1485,7 +1495,7 @@ export default function PainelProspeccao() {
                       </div>
                       <div className="flex items-center gap-2 mt-1.5 flex-wrap">
                         <button
-                          onClick={() => irParaCidade(r.uf, r.cidadeNome)}
+                          onClick={() => irParaCidade(r.uf, r.cidadeNome, r.segmento)}
                           title={`Abrir ${r.cidadeNome}`}
                           style={{ background: "#e0a458", color: "#14181f" }}
                           className="text-[10px] font-semibold px-2 py-1 rounded-md whitespace-nowrap shrink-0"
@@ -1507,7 +1517,9 @@ export default function PainelProspeccao() {
               )}
               {buscaAberta && buscaGlobal.trim() && resultadosBusca.itens.length === 0 && !buscaContatoCarregando && (
                 <div style={{ background: "#1c222c", border: "1px solid #2c3444" }} className="absolute right-0 mt-1.5 w-64 rounded-xl overflow-hidden shadow-2xl z-20 px-3.5 py-2.5 text-xs text-slate-500">
-                  Nada encontrado
+                  {sellerSession && resultadosBusca.tipo === "contato"
+                    ? (tokensBuscaVendedor.length ? "Nenhum contato com esse número nos estados que você abriu" : "Abra o seu estado com a senha para buscar telefones")
+                    : "Nada encontrado"}
                 </div>
               )}
             </div>}
