@@ -830,6 +830,28 @@ function requireStateOrAdmin(meta, req, seg, uf) {
   const e = new Error("digite a senha deste estado para continuar"); e.statusCode = 403; throw e;
 }
 
+function sellerUnlockedStates(meta, req) {
+  // Busca por telefone no Acesso 2: o navegador envia os tokens dos estados que
+  // o vendedor já abriu com a senha. Cada token é validado aqui (assinatura,
+  // validade, versão da senha e vendedor atribuído). A busca nunca passa dos
+  // estados liberados, então o vendedor não vê contato de estado fechado.
+  const gate = verifyTokenRaw(sellerCookie(req));
+  if (gate?.type !== "seller") return [];
+  const raw = String(req.headers?.["x-state-tokens"] || "");
+  const out = [];
+  const seen = new Set();
+  for (const token of raw.split(",").map((t) => t.trim()).filter(Boolean).slice(0, 40)) {
+    const p = verifyTokenRaw(token);
+    if (p?.type !== "state") continue;
+    const k = assignmentKey(p.seg, p.uf);
+    if (seen.has(k)) continue;
+    if (p.v !== (meta.authVersions?.[k] || 1) || meta.atribuicoes?.[k] !== p.sellerId) continue;
+    seen.add(k);
+    out.push({ seg: p.seg, uf: p.uf });
+  }
+  return out;
+}
+
 function publicCitySummary(city) {
   const contacts = Array.isArray(city?.contatos) ? city.contatos : [];
   const sent = contacts.reduce((n, c) => n + (c?.enviado ? 1 : 0), 0);
@@ -1097,15 +1119,18 @@ async function cityResponse(client, seg, uf, cityName, offset = 0, limit = 1000,
   };
 }
 
-async function searchContacts(client, digits, maxResults = 8, segFilter = "") {
+async function searchContacts(client, digits, maxResults = 8, segFilter = "", allowedStates = null) {
   const q = String(digits || "").replace(/\D/g, "");
   if (q.length < 4) return [];
+  const allowed = allowedStates ? new Set(allowedStates.map((s) => assignmentKey(s.seg, s.uf))) : null;
+  if (allowed && !allowed.size) return [];
   const refs = await client.smembers(STATE_INDEX_KEY);
   const found = [];
   for (const ref of refs) {
     const parsed = parseStateRef(ref);
     if (!parsed) continue;
     if (segFilter && parsed.seg !== segFilter) continue;
+    if (allowed && !allowed.has(assignmentKey(parsed.seg, parsed.uf))) continue;
     const names = await client.hkeys(stateSummaryKey(parsed.seg, parsed.uf));
     for (let i = 0; i < names.length; i += 40) {
       const batchNames = names.slice(i, i + 40);
@@ -1568,11 +1593,25 @@ export default async function handler(req, res) {
       }
 
       if (mode === "search_contacts") {
-        requireAdmin(meta, req);
         const q = String(req.query?.q || "").replace(/\D/g, "");
-        const seg = String(req.query?.seg || "");
-        if (q.length < 4) { res.status(200).json({ items: [] }); return; }
-        res.status(200).json({ items: await searchContacts(client, q, 8, seg) });
+        if (session?.type === "admin") {
+          const seg = String(req.query?.seg || "");
+          if (q.length < 4) { res.status(200).json({ items: [] }); return; }
+          res.status(200).json({ items: await searchContacts(client, q, 8, seg) });
+          return;
+        }
+        // Acesso 2: somente nos estados já desbloqueados com a senha do estado.
+        if (verifyTokenRaw(sellerCookie(req))?.type !== "seller") {
+          res.status(401).json({ error: "sessão do Acesso 2 expirada; entre novamente" });
+          return;
+        }
+        const estados = sellerUnlockedStates(meta, req);
+        if (q.length < 4 || !estados.length) { res.status(200).json({ items: [], estados: estados.length }); return; }
+        const found = await searchContacts(client, q, 8, "", estados);
+        res.status(200).json({
+          estados: estados.length,
+          items: found.map((c) => ({ ...sellerContactView(c), segmento: c.segmento, uf: c.uf, cidadeNome: c.cidadeNome })),
+        });
         return;
       }
 
